@@ -41,6 +41,7 @@
     "extensions/bash-intent.ts",
     "extensions/theme-colors.ts",
     "extensions/terminal-theme.ts",
+    "extensions/terminal-title.ts",
     "config/config.example.json",
     "README.md",
     "CHANGELOG.md"

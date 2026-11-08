@@ -7,6 +7,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Loader } from "@earendil-works/pi-tui";
 
 import { getUserSettingsPath } from "./settings-path";
+import { installTerminalTitle } from "./terminal-title";
 
 // ---------------------------------------------------------------------------
 // Patch built-in Loader with Claude/OpenBrawd-style glyphs.
@@ -794,6 +795,7 @@ const TURN_COMPLETION_MS = 2_500;
 
 
 export default function (pi: ExtensionAPI) {
+	installTerminalTitle(pi, describeToolActivity);
 	let agentStartTime = 0;
 	let turnStartTime = 0;
 	let refreshTimer: ReturnType<typeof setTimeout> | null = null;
