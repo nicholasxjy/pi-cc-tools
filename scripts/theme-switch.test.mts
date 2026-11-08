@@ -72,10 +72,19 @@ async function assertClaudeDiffPalette(rendered: string, name: string): Promise<
 	assert.ok(backgrounds.length > 0, "the diff has tinted row and word backgrounds");
 	assert.ok(backgrounds.every((m) => ((+m[1] + +m[2] + +m[3]) > 450) === (name === "light")),
 		`${name} diff backgrounds match the theme's appearance`);
+	for (const m of backgrounds) {
+		const channels = [+m[1], +m[2], +m[3]];
+		assert.ok(Math.max(...channels) - Math.min(...channels) <= (name === "light" ? 30 : 35),
+			`${name} row and word backgrounds use restrained red/green tints`);
+	}
+	assert.ok(new Set(backgrounds.map((m) => m[0])).size >= 4, "row and word highlights keep distinct shades");
 	const surface = name === "light" ? { r: 232, g: 233, b: 236 } : { r: 32, g: 35, b: 42 };
 	const markers = [...rendered.matchAll(/\x1b\[38;2;(\d+);(\d+);(\d+)m▌/g)];
 	assert.ok(markers.length > 0, "the diff has add/delete markers");
 	for (const m of markers) {
+		const channels = [+m[1], +m[2], +m[3]];
+		assert.ok(Math.max(...channels) - Math.min(...channels) <= (name === "light" ? 120 : 90),
+			`${name} add/delete markers use softer colors`);
 		assert.ok(contrastRatio({ r: +m[1], g: +m[2], b: +m[3] }, surface) >= 3,
 			`${name} add/delete markers stay visible against the surface`);
 	}
