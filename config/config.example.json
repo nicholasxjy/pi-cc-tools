@@ -4,6 +4,7 @@
   "searchOutputMode": "preview",
   "mcpOutputMode": "preview",
   "previewLines": 8,
+  "codemodePreviewLines": 5,
   "expandedPreviewMaxLines": 4000,
   "extraExpandedPreviewMaxLines": 12000,
   "extraToolOutputExpanded": false,

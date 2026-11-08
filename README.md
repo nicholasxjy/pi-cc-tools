@@ -119,6 +119,7 @@ Settings are read from `.pi/settings.json` in the project and from the agent set
   "bashOutputMode": "opencode",
   "bashIntent": "off",
   "previewLines": 8,
+  "codemodePreviewLines": 5,
   "expandedPreviewMaxLines": 4000,
   "extraExpandedPreviewMaxLines": 12000,
   "extraToolOutputExpanded": false,
@@ -133,6 +134,8 @@ Settings are read from `.pi/settings.json` in the project and from the agent set
 
 The screenshots on this page use `"toolBackground": "transparent"`.
 
+Codemode stays outside tool groups so its preview remains visible. Script and output each get their own `codemodePreviewLines` budget, counted after wrapping to the terminal width; headings, status and truncation hints are extra. Click or press `Ctrl+O` to expand using the existing expanded preview limits. After editing this setting, run `/reload`.
+
 ### Layout
 
 | Setting | Default | Description |
@@ -141,6 +144,7 @@ The screenshots on this page use `"toolBackground": "transparent"`.
 | `groupToolCalls` | `true` | Fold consecutive tool calls into one row |
 | `thinkingMode` | `live` | `live` collapses finished thinking to `Thought for Xs`, `full` keeps it expanded, `latest` hides it in all but the latest message |
 | `previewLines` | `8` | Lines in a collapsed preview |
+| `codemodePreviewLines` | `5` | Visible terminal lines in each collapsed codemode script and output preview; `0` hides both previews. Accepts non-negative integers; invalid values use `5` |
 | `expandedPreviewMaxLines` | `4000` | Line limit when a row is expanded |
 | `extraExpandedPreviewMaxLines` | `12000` | Line limit in `Ctrl+Shift+O` mode |
 | `extraToolOutputExpanded` | `false` | Start in `Ctrl+Shift+O` mode |

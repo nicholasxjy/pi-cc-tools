@@ -154,6 +154,8 @@ interface SettingsFile {
 	searchOutputMode?: "hidden" | "count" | "preview";
 	mcpOutputMode?: "hidden" | "summary" | "preview";
 	previewLines?: number;
+	/** Visual lines shown in each collapsed codemode script/output preview. Defaults to 5; 0 hides it. */
+	codemodePreviewLines?: number;
 	expandedPreviewMaxLines?: number;
 	extraExpandedPreviewMaxLines?: number;
 	extraToolOutputExpanded?: boolean;
@@ -1049,7 +1051,7 @@ function formatBranchedToolLines(
 	return output;
 }
 
-const NON_GROUPABLE_TOOL_NAMES = new Set(["edit", "write", "apply_patch"]);
+const NON_GROUPABLE_TOOL_NAMES = new Set(["edit", "write", "apply_patch", "codemode"]);
 const ACTIVE_TOOL_GROUPS = new Set<any>();
 
 function isGroupableTool(value: unknown): value is InstanceType<typeof ToolExecutionComponent> {
@@ -3990,6 +3992,7 @@ function patchToolExecutionRenderers(): void {
 			return (args: any, theme: Theme, ctx: any) =>
 				renderApplyPatchCall(args, theme, ctx, (path: string) => shortPath(ctx.cwd ?? process.cwd(), path));
 		}
+		if (toolName === "codemode") return renderCodemodeCall;
 		if (shouldUseGenericToolRenderer(toolName)) {
 			return (args: any, theme: Theme, ctx: any) => renderGenericToolCall(toolName, args, theme, ctx);
 		}
@@ -4002,6 +4005,8 @@ function patchToolExecutionRenderers(): void {
 		if (toolName === "apply_patch") {
 			renderer = (result: any, options: any, theme: Theme, ctx: any) =>
 				renderApplyPatchResult({ content: result.content, details: result.details }, options.isPartial, theme, ctx);
+		} else if (toolName === "codemode") {
+			renderer = renderCodemodeResult;
 		} else if (shouldUseGenericToolRenderer(toolName)) {
 			renderer = (result: any, options: any, theme: Theme, ctx: any) =>
 				renderGenericToolResult(toolName, result, options, theme, ctx);
@@ -4841,6 +4846,11 @@ function makeResponsiveDiffText(ctx: any, last: unknown, text: string): Text {
 function previewLimit(): number {
 	const value = readSettings().previewLines;
 	return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 8;
+}
+
+function codemodePreviewLimit(): number {
+	const value = readSettings().codemodePreviewLines;
+	return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : 5;
 }
 
 function expandedPreviewLimit(): number {
@@ -7209,6 +7219,67 @@ function renderGenericToolResult(name: string, result: any, options: any, theme:
 		theme,
 		ctx,
 	);
+}
+
+class CodemodePreview extends ToolText {
+	private readonly expanded: boolean;
+	private readonly theme: Theme;
+
+	constructor(text: string, expanded: boolean, theme: Theme) {
+		super(withBranch(text, theme, false, false, false));
+		this.expanded = expanded;
+		this.theme = theme;
+	}
+
+	render(width: number): string[] {
+		const limit = this.expanded ? expandedPreviewLimit() : codemodePreviewLimit();
+		if (limit === 0) return [];
+		// Count after ToolText wraps with the actual width and branch indentation.
+		const lines = super.render(width);
+		if (lines.length <= limit) return lines;
+		let hint = this.theme.fg("muted", `... (${lines.length - limit} more lines${inlineDetailHint(this.expanded, true)})`);
+		if (this.expanded) {
+			hint += `\n${this.theme.fg("warning", `(display capped at ${limit} lines${deepExpandHint()})`)}`;
+		}
+		return [...lines.slice(0, limit), ...makeText(undefined, withBranch(hint, this.theme)).render(width)];
+	}
+}
+
+function renderCodemodeCall(args: any, theme: Theme, ctx: any): Container {
+	syncToolCallStatus(ctx);
+	const component = ctx.lastComponent instanceof Container ? ctx.lastComponent : new Container();
+	component.clear();
+	component.addChild(makeText(undefined, toolHeader("Codemode", "", theme, toolStatusDot(ctx, theme), liveLineCountTrailing(ctx, theme))));
+	const code = getStringArg(args, "code").replace(/\r/g, "").trimEnd();
+	if (code) {
+		const styled = code.split("\n").map((line) => theme.fg("accent", line || " ")).join("\n");
+		component.addChild(new CodemodePreview(styled, !!ctx.expanded, theme));
+	}
+	return component;
+}
+
+function renderCodemodeResult(result: any, options: any, theme: Theme, ctx: any): Container | Text {
+	if (options.isPartial) {
+		return makeText(ctx.lastComponent, runningPreviewBlock(result, "", !!options.expanded, theme, ctx));
+	}
+	clearBlinkTimer(ctx);
+	setToolStatus(ctx, ctx.isError ? "error" : "success");
+	const raw = getTextContent(result).replace(/\r\n/g, "\n");
+	const header = /^Script (completed|failed)\nWall time ([\d.]+) seconds\nOutput:\n/.exec(raw);
+	const output = (header ? raw.slice(header[0].length) : raw).trim();
+	const status = ctx.isError || header?.[1] === "failed" ? "Failed" : header ? "Completed" : "Done";
+	const summary = `${status}${header ? ` · ${header[2]}s` : ""}${output && !options.expanded && codemodePreviewLimit() === 0 ? toolOutputDetailHint(theme, false) : ""}`;
+	const component = ctx.lastComponent instanceof Container ? ctx.lastComponent : new Container();
+	component.clear();
+	component.addChild(makeText(undefined, withBranch(theme.fg(ctx.isError ? "error" : "muted", summary), theme)));
+	if (output) {
+		const styled = output.split("\n").map((line) => theme.fg(ctx.isError ? "error" : "dim", line || " ")).join("\n");
+		component.addChild(new CodemodePreview(styled, !!options.expanded, theme));
+	}
+	if (typeof result.details?.fullOutputPath === "string") {
+		component.addChild(makeText(undefined, withBranch(theme.fg("muted", `Full output: ${result.details.fullOutputPath}`), theme)));
+	}
+	return component;
 }
 
 function getTextContent(result: any): string {
