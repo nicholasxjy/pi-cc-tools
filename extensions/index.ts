@@ -751,6 +751,11 @@ function paintStatusDot(colorAnsi: string): string {
 }
 
 function themeStatusDot(theme: Theme, colorKey: "success" | "error" | "dim" | "muted"): string {
+	if (!themeAdaptiveEnabled()) {
+		const color = colorKey === "success" ? _claudeStyleDefaults.TOOL_STATUS_SUCCESS
+			: colorKey === "error" ? _claudeStyleDefaults.TOOL_STATUS_ERROR : _claudeStyleDefaults.TOOL_STATUS_PENDING;
+		return paintStatusDot(color);
+	}
 	// theme.fg may not preserve nested SGR cleanly — color the glyph string itself.
 	return theme.fg(colorKey, `${STATUS_DOT_BOLD}${STATUS_DOT_FILLED}`);
 }
@@ -769,6 +774,7 @@ function paintAgentBreatheDot(colorAnsi: string = TOOL_STATUS_SUCCESS): string {
 }
 
 function agentBreatheDot(theme: Theme): string {
+	if (!themeAdaptiveEnabled()) return paintAgentBreatheDot(_claudeStyleDefaults.TOOL_STATUS_SUCCESS);
 	const glyph = agentBreatheGlyphRaw();
 	if (glyph === " ") return " ";
 	const bold = glyph === "●" ? STATUS_DOT_BOLD : "";

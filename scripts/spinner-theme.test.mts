@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { register } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,6 +14,7 @@ const agentDir = mkdtempSync(join(tmpdir(), "spinner-theme-"));
 const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 process.env.PI_CODING_AGENT_DIR = agentDir;
 
+const { Loader } = await import("@earendil-works/pi-tui");
 const themeModule = await import("../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js");
 themeModule.initTheme("dark", false);
 const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
@@ -51,6 +52,13 @@ test.after(async () => {
 	rmSync(agentDir, { recursive: true, force: true });
 });
 
+function spinnerFrame(): string {
+	const loader = new Loader({ requestRender() {} } as any,
+		(frame) => themeModule.theme.fg("accent", frame), (message) => message, "Loading");
+	loader.stop();
+	return loader.render(80).join("\n");
+}
+
 test("the spinner verb follows a theme switch on the same theme proxy", async () => {
 	await fire("agent_start");
 	await fire("turn_start");
@@ -63,4 +71,25 @@ test("the spinner verb follows a theme switch on the same theme proxy", async ()
 	assert.notEqual(light, dark, "the two built-in themes use different accents");
 	await fire("turn_start");
 	assert.equal(verbColor(), light);
+	assert.ok(spinnerFrame().includes(`${themeModule.theme.getFgAnsi("accent")}·`));
+});
+
+test("the spinner glyph and verb use Claude orange with adaptive colors off", async () => {
+	const orange = "\x1b[38;2;215;119;87m";
+	writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ themeAdaptive: false }));
+	const bustKey = Symbol.for("pi-claude-style-tools:spinner-settings-bust");
+	(globalThis as any)[bustKey] = ((globalThis as any)[bustKey] ?? 0) + 1;
+	for (const name of ["dark", "light"]) {
+		themeModule.setTheme(name, false);
+		await fire("turn_start");
+		assert.equal(verbColor(), orange);
+		const frame = spinnerFrame();
+		assert.ok(frame.includes(`${orange}·`), JSON.stringify(frame));
+	}
+
+	writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ themeAdaptive: true }));
+	(globalThis as any)[bustKey]++;
+	await fire("turn_start");
+	assert.equal(verbColor(), themeModule.theme.getFgAnsi("borderAccent"));
+	assert.ok(spinnerFrame().includes(`${themeModule.theme.getFgAnsi("accent")}·`));
 });
