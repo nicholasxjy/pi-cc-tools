@@ -2272,7 +2272,7 @@ function getThinkingDurationMetadata(message: any): number | undefined {
 	const stored = thinkingDurationByMessage.get(thinkingStateKey(message)) ?? message[THINKING_DURATION_KEY];
 	return typeof stored === "number"
 		&& Number.isFinite(stored)
-		&& stored > 0
+		&& stored >= 0
 		&& stored <= MAX_REASONABLE_THINKING_DURATION_MS
 		? stored
 		: undefined;
@@ -3604,6 +3604,9 @@ function patchAssistantMessages(): void {
 		if (!message || !Array.isArray(message.content)) {
 			return originalUpdateContent.call(this, message, isStreaming);
 		}
+		// The UI may receive a fresh snapshot without the extension event's content array.
+		if (isStreaming === true) streamingAssistantContents.add(thinkingStateKey(message));
+		else if (isStreaming === false) streamingAssistantContents.delete(thinkingStateKey(message));
 		// Pi defaults hideThinkingBlock to false; the mode must supply its own default.
 		const liveMode = getThinkingMode() !== "full";
 		const thinkingCollapsed = thinkingVisibilityOverride ?? liveMode;
