@@ -6202,13 +6202,13 @@ async function codeToAnsiLazy(code: string, language: BundledLanguage, theme: Bu
 	return codeToAnsi(code, language, theme);
 }
 
-const hlCache = new Map<string, string[]>();
+const hlCache = new Map<string, Promise<string[]>>();
 
 function clearHighlightCache(): void {
 	hlCache.clear();
 }
 
-function touchCache(key: string, value: string[]): string[] {
+function touchCache(key: string, value: Promise<string[]>): Promise<string[]> {
 	hlCache.delete(key);
 	hlCache.set(key, value);
 	while (hlCache.size > CACHE_LIMIT) {
@@ -6226,16 +6226,17 @@ async function hlBlock(code: string, language: BundledLanguage | undefined): Pro
 	const key = `${diffThemeName(diffTheme)}\0${language}\0${code}`;
 	const hit = hlCache.get(key);
 	if (hit) return touchCache(key, hit);
-	try {
-		const raw = await codeToAnsiLazy(code, language, diffTheme as any);
+	// Cache the promise too, so identical previews share in-flight tokenization.
+	const pending = codeToAnsiLazy(code, language, diffTheme).then((raw) => {
 		// Themes generated from pi already meet pi's contrast rules for this background;
 		// only bundled themes need their too-dark / too-light colors muted.
 		const ansi = typeof diffTheme === "string" ? normalizeShikiContrast(raw) : raw;
-		const out = (ansi.endsWith("\n") ? ansi.slice(0, -1) : ansi).split("\n");
-		return touchCache(key, out);
-	} catch {
+		return (ansi.endsWith("\n") ? ansi.slice(0, -1) : ansi).split("\n");
+	}).catch(() => {
+		if (hlCache.get(key) === pending) hlCache.delete(key);
 		return code.split("\n");
-	}
+	});
+	return touchCache(key, pending);
 }
 
 async function mapWithConcurrency<T, R>(items: T[], limit: number, mapItem: (item: T, index: number) => Promise<R>): Promise<R[]> {
@@ -7245,15 +7246,34 @@ class CodemodePreview extends ToolText {
 	}
 }
 
+function codemodeCode(code: string, theme: Theme, ctx: any): string {
+	// shortcut: cap tokenization at MAX_HL_CHARS; highlight a visible prefix if larger scripts need color.
+	if (!ctx.argsComplete || code.length > MAX_HL_CHARS) {
+		ctx.state._codemodeHighlight = undefined;
+	} else {
+		const key = `${diffThemeName(DIFF_THEME)}\0${code}`;
+		if (ctx.state._codemodeHighlight?.key !== key) {
+			const entry = { key, text: undefined as string | undefined };
+			ctx.state._codemodeHighlight = entry;
+			void hlBlock(code, "javascript").then((lines) => {
+				if (ctx.state._codemodeHighlight !== entry) return;
+				entry.text = lines.join("\n");
+				safeInvalidate(ctx);
+			});
+		}
+		if (ctx.state._codemodeHighlight.text !== undefined) return ctx.state._codemodeHighlight.text;
+	}
+	return code.split("\n").map((line) => theme.fg("accent", line || " ")).join("\n");
+}
+
 function renderCodemodeCall(args: any, theme: Theme, ctx: any): Container {
 	syncToolCallStatus(ctx);
 	const component = ctx.lastComponent instanceof Container ? ctx.lastComponent : new Container();
 	component.clear();
 	component.addChild(makeText(undefined, toolHeader("Codemode", "", theme, toolStatusDot(ctx, theme), liveLineCountTrailing(ctx, theme))));
 	const code = getStringArg(args, "code").replace(/\r/g, "").trimEnd();
-	if (code) {
-		const styled = code.split("\n").map((line) => theme.fg("accent", line || " ")).join("\n");
-		component.addChild(new CodemodePreview(styled, !!ctx.expanded, theme));
+	if (code && (ctx.expanded || codemodePreviewLimit() > 0)) {
+		component.addChild(new CodemodePreview(codemodeCode(code, theme, ctx), !!ctx.expanded, theme));
 	}
 	return component;
 }
