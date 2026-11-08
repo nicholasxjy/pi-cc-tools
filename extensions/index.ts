@@ -185,6 +185,7 @@ interface SettingsFile {
 	/**
 	 * When true (default), derive borders, dim text, branch rules, and diff
 	 * accents from the active pi theme via `theme.getFgAnsi`/`getBgAnsi`.
+	 * When false, use a fixed Claude palette with light/dark variants.
 	 * Explicit `diffTheme` / `diffColors` always win over theme-derived
 	 * defaults so users keep full control.
 	 */
@@ -5529,6 +5530,8 @@ function diffThemeName(theme: BundledTheme | ShikiThemeRegistration): string {
 }
 const UNIVERSAL_DIFF_ADD_FG = { r: 110, g: 210, b: 130 };
 const UNIVERSAL_DIFF_DEL_FG = { r: 225, g: 110, b: 110 };
+const UNIVERSAL_DIFF_ADD_FG_LIGHT = { r: 26, g: 127, b: 55 };
+const UNIVERSAL_DIFF_DEL_FG_LIGHT = { r: 207, g: 34, b: 46 };
 
 function mixRgb(
 	a: { r: number; g: number; b: number },
@@ -5592,10 +5595,10 @@ function autoDeriveBgFromTheme(theme: any): void {
 	// fg accents. On pi >= 1.4 the backgrounds tint the row's real surface toward
 	// those colors (deriveDiffPaletteFromThemeColors). Older pi versions only
 	// expose ANSI escapes, so the base is taken from `toolSuccessBg` and mixed
-	// with fixed tint targets. Falls back to the universal dark palette when the
-	// theme is unavailable or themeAdaptive=false.
+	// with fixed tint targets. With themeAdaptive=false, the fixed Claude palette
+	// still follows the theme's light/dark appearance.
 	const useTheme = themeAdaptiveEnabled() && theme;
-	const onLight = useTheme && isLightThemeBackground(theme);
+	const onLight = !!theme && isLightThemeBackground(theme);
 	_diffOnLightBg = !!onLight;
 	if (useTheme && deriveDiffPaletteFromThemeColors(theme)) {
 		BG_EMPTY = TRANSPARENT_BG;
@@ -5605,8 +5608,8 @@ function autoDeriveBgFromTheme(theme: any): void {
 		DEFAULT_DIFF_COLORS = { fgAdd: FG_ADD, fgDel: FG_DEL, fgCtx: FG_DIM };
 		return;
 	}
-	const addFgRgb = (useTheme && themeFgRgb(theme, "toolDiffAdded")) || UNIVERSAL_DIFF_ADD_FG;
-	const delFgRgb = (useTheme && themeFgRgb(theme, "toolDiffRemoved")) || UNIVERSAL_DIFF_DEL_FG;
+	const addFgRgb = (useTheme && themeFgRgb(theme, "toolDiffAdded")) || (onLight ? UNIVERSAL_DIFF_ADD_FG_LIGHT : UNIVERSAL_DIFF_ADD_FG);
+	const delFgRgb = (useTheme && themeFgRgb(theme, "toolDiffRemoved")) || (onLight ? UNIVERSAL_DIFF_DEL_FG_LIGHT : UNIVERSAL_DIFF_DEL_FG);
 	const base =
 		(useTheme && themeBgRgb(theme, "toolSuccessBg")) ||
 		(useTheme && themeBgRgb(theme, "userMessageBg")) ||
@@ -5675,11 +5678,6 @@ function resetThemePalette(): void {
 function applyThemePaletteIfNeeded(theme: any): void {
 	if (!theme) return;
 	_lastSeenTheme = theme;
-	if (!themeAdaptiveEnabled()) {
-		applyToolBranchColor(theme);
-		syncOutlineChromeFromBranch(theme);
-		return;
-	}
 	const themeName = typeof theme?.name === "string" ? theme.name : "";
 	const fingerprint = themePaletteFingerprint(theme);
 	if (
@@ -5702,6 +5700,17 @@ function applyThemePaletteIfNeeded(theme: any): void {
 	_themePaletteCacheTheme = theme;
 	_themePaletteCacheName = themeName;
 	_themePaletteCacheFingerprint = fingerprint;
+
+	if (!themeAdaptiveEnabled()) {
+		applyToolBranchColor(theme);
+		_diffOnLightBg = isLightThemeBackground(theme);
+		if (!hasExplicitBgConfig) {
+			autoDeriveBgFromTheme(theme);
+			autoDerivePending = false;
+		}
+		syncDiffShikiTheme(theme);
+		return;
+	}
 
 	const borderMuted = safeFgAnsi(theme, "borderMuted");
 	const muted = safeFgAnsi(theme, "muted");

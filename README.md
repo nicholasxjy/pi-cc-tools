@@ -177,7 +177,7 @@ Scripts use pi's built-in JavaScript highlighting and syntax colors. Each stream
 | Setting | Default | Description |
 | --- | --- | --- |
 | `terminalTheme` | `true` | Use pi's `system` theme, built from the terminal's palette (pi 1.4+) |
-| `themeAdaptive` | `true` | Derive diff colors, connectors and the spinner from the active pi theme. `false` keeps a fixed Claude palette |
+| `themeAdaptive` | `true` | Derive diff colors, connectors and the spinner from the active pi theme. `false` uses a fixed Claude palette with light/dark variants |
 | `diffTheme` | unset | A Shiki theme for diff code, such as `github-dark`. Unset uses the pi theme's syntax colors |
 | `diffColors` | unset | Override individual diff colors |
 | `spinnerVerbColor` | `borderAccent` | Theme color of the spinner's verb |
