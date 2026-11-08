@@ -28,9 +28,10 @@ themes.initTheme("dark", false);
 
 const tools = new Map<string, any>();
 const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
+const commands = new Map<string, any>();
 const fakePi = {
 	registerTool: (tool: any) => tools.set(tool.name, tool),
-	registerCommand() {},
+	registerCommand: (name: string, command: any) => commands.set(name, command),
 	registerShortcut() {},
 	on: (event: string, handler: any) => handlers.set(event, [...(handlers.get(event) ?? []), handler]),
 	getThinkingLevel: () => "off",
@@ -281,3 +282,35 @@ test("the ctrl+o hint is in parentheses, and never nested inside another pair", 
 		assert.ok(!/\(\(|\)\)/.test(more), more);
 	}
 });
+
+for (const adaptive of [false, true]) {
+	for (const themeName of ["dark", "light"]) {
+		for (const status of ["success", "error", "idle", "pending", "agent"] as const) {
+			test(`${status} tool dots use ${adaptive ? "theme" : "Claude"} colors on ${themeName}`, async () => {
+				themes.setTheme(themeName, false);
+				await commands.get("cc-theme").handler(adaptive ? "on" : "off", {
+					hasUI: true, ui: { theme: themes.theme, notify() {} },
+				});
+				for (const handler of handlers.get("agent_start") ?? []) await handler({}, { ui: {}, hasUI: false });
+				try {
+					const name = status === "agent" ? "Agent" : "read";
+					const row = new ToolExecutionComponent(name, `${status}-${themeName}`, { path: "a.ts", description: "Check" },
+						{ showImages: false }, tools.get(name), ui, cwd) as any;
+					row.setArgsComplete();
+					if (status === "success" || status === "error") {
+						row.updateResult({ content: [{ type: "text", text: "done" }], isError: status === "error" }, false);
+					} else if (status !== "idle") {
+						row.markExecutionStarted();
+					}
+					const key = status === "error" ? "error" : status === "idle" ? "dim" : "success";
+					const color = adaptive ? themes.theme.getFgAnsi(key)
+						: key === "error" ? "\x1b[31m" : key === "dim" ? "\x1b[90m" : "\x1b[32m";
+					const header = row.render(100).find((line: string) => line.includes("●")) ?? "";
+					assert.ok(header.includes(`${color}\x1b[1m●`), JSON.stringify(header));
+				} finally {
+					for (const handler of handlers.get("agent_end") ?? []) await handler({}, { ui: {}, hasUI: false });
+				}
+			});
+		}
+	}
+}

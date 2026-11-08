@@ -44,7 +44,7 @@ function readSpinnerSettings(): { adaptive: boolean; verbColor: string; statusCo
 		return _spinnerSettingsCache.value;
 	}
 	let adaptive = true;
-	// Spinner glyph is still pi's accent. Use borderAccent for the verb so it
+	// With adaptive colors on, the glyph uses pi's accent. Use borderAccent for the verb so it
 	// feels themed and lively without collapsing into the exact same Claude
 	// orange as the glyph on themes like openAntigravity-dark.
 	let verbColor = "borderAccent";
@@ -162,7 +162,8 @@ function stopLoaderIfUiStopped(loader: any): boolean {
 	const message = typeof this.message === "string" && RAW_ANSI_RE.test(this.message)
 		? this.message
 		: this.messageColorFn(this.message);
-	const nextText = `${this.spinnerColorFn(frame)} ${message}`;
+	const spinner = themeAdaptiveEnabled() ? this.spinnerColorFn(frame) : `${_DEFAULT_CLAUDE_ORANGE}${frame}${RESET}`;
+	const nextText = `${spinner} ${message}`;
 	if ((this as any)[LOADER_LAST_TEXT] === nextText) return;
 	(this as any)[LOADER_LAST_TEXT] = nextText;
 	this.setText(nextText);
