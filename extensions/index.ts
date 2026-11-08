@@ -626,6 +626,7 @@ function setToolGroupingEnabled(enabled: boolean): void {
 
 type ThinkingMode = "live" | "full" | "latest";
 const THINKING_MODES = ["live", "full", "latest"] as const;
+let thinkingVisibilityOverride: boolean | undefined;
 
 function getThinkingMode(): ThinkingMode {
 	return getMode(readSettings().thinkingMode, THINKING_MODES, "live");
@@ -1558,6 +1559,7 @@ function requestChatRender(ctx: any): void {
 }
 
 function applyThinkingModeToChats(): void {
+	thinkingVisibilityOverride = undefined;
 	for (const parent of CHAT_CONTAINERS) {
 		const children = parent?.children;
 		if (!Array.isArray(children)) {
@@ -3585,6 +3587,12 @@ function patchAssistantMessages(): void {
 		};
 		proto[ASSISTANT_RENDER_PATCH_FLAG] = true;
 	}
+	const originalSetHideThinkingBlock = proto.setHideThinkingBlock;
+	proto.setHideThinkingBlock = function patchedSetHideThinkingBlock(hide: boolean) {
+		// Keep explicit user toggles while the mode supplies the initial visibility.
+		thinkingVisibilityOverride = hide;
+		return originalSetHideThinkingBlock.call(this, hide);
+	};
 	const originalUpdateContent = proto.updateContent;
 	const renderContent = function patchedUpdateContent(this: any, message: any, isStreaming?: boolean) {
 		// Content changed (also reached via invalidate() → updateContent): drop the
@@ -3596,15 +3604,9 @@ function patchAssistantMessages(): void {
 		if (!message || !Array.isArray(message.content)) {
 			return originalUpdateContent.call(this, message, isStreaming);
 		}
-		// Thinking display:
-		// When thinking blocks are expanded via Ctrl+T (`hideThinkingBlock === false`),
-		// all thinking blocks (old and new) render in full markdown.
-		// When thinking blocks are collapsed (`hideThinkingBlock === true`):
-		// - "live" mode (default): the actively-streaming thinking block renders
-		//   expanded while streaming, and collapses to `Thought for Xs` once done.
-		// - "full" mode: behaves like stock pi (stays collapsed).
+		// Pi defaults hideThinkingBlock to false; the mode must supply its own default.
 		const liveMode = getThinkingMode() !== "full";
-		const thinkingCollapsed = !!(this as any).hideThinkingBlock;
+		const thinkingCollapsed = thinkingVisibilityOverride ?? liveMode;
 		const override = (this as any).thinkingVisibilityOverrides?.get?.(0);
 		const showLiveThinking = liveMode && thinkingCollapsed && override !== true && isLiveThinkingMessage(this, message);
 		const hideThinking = override ?? (thinkingCollapsed && !showLiveThinking);
@@ -3612,12 +3614,13 @@ function patchAssistantMessages(): void {
 			// Pi wraps this in theme.italic/fg again — keep plain label for the placeholder pass.
 			(this as any).hiddenThinkingLabel = "Thinking…";
 		}
-		if (showLiveThinking) (this as any).hideThinkingBlock = false;
+		const originalHideThinkingBlock = (this as any).hideThinkingBlock;
+		(this as any).hideThinkingBlock = hideThinking;
 		try {
 			// Call original to build all children (text, thinking, spacers, errors)
 			originalUpdateContent.call(this, message, isStreaming);
 		} finally {
-			if (showLiveThinking) (this as any).hideThinkingBlock = true;
+			(this as any).hideThinkingBlock = originalHideThinkingBlock;
 		}
 		// Replace text-block Markdown children with DottedParagraph wrappers
 		const container = (this as any).contentContainer;
@@ -7054,6 +7057,7 @@ function registerThinkingLabels(pi: ExtensionAPI): void {
 		// never look "in flight" and re-arm blink timers.
 		currentAgentWorkStartMs = undefined;
 		currentAssistantMessageStartMs = undefined;
+		thinkingVisibilityOverride = undefined;
 		sessionStartMs = undefined;
 		userTurnCount = 0;
 	});
