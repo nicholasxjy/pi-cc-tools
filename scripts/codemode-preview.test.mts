@@ -1,8 +1,7 @@
 process.env.FORCE_COLOR = "3";
 import assert from "node:assert/strict";
-import { EventEmitter, once } from "node:events";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { register } from "node:module";
+import { createRequire, register } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { mock } from "node:test";
@@ -24,6 +23,7 @@ function settings(value?: unknown, extra: Record<string, unknown> = {}) {
 settings();
 
 const { ToolExecutionComponent } = await import("@earendil-works/pi-coding-agent");
+const hljs = createRequire(import.meta.resolve("@earendil-works/pi-coding-agent"))("highlight.js/lib/index.js");
 const { Container, visibleWidth } = await import("@earendil-works/pi-tui");
 const { initTheme, setTheme } = await import("../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js");
 initTheme("dark", false);
@@ -54,17 +54,10 @@ function result(text = output, isError = false, details?: unknown) {
 	};
 }
 function row(code = script, finished = result(), complete = true) {
-	const renders = new EventEmitter();
-	const component = new ToolExecutionComponent("codemode", `codemode-${Math.random()}`, { code }, { showImages: false }, undefined, { requestRender() { renders.emit("render"); } } as any, agentDir) as any;
-	component.renders = renders;
+	const component = new ToolExecutionComponent("codemode", `codemode-${Math.random()}`, { code }, { showImages: false }, undefined, { requestRender() {} } as any, agentDir) as any;
 	if (complete) component.setArgsComplete();
 	component.updateResult(finished, false);
 	return component;
-}
-async function highlighted(component: any): Promise<void> {
-	while (component.rendererState._codemodeHighlight?.text === undefined) {
-		await once(component.renders, "render", { signal: AbortSignal.timeout(5000) });
-	}
 }
 const codeLines = (lines: string[]) => lines.filter((line) => line.includes('text("code-'));
 const outputLines = (lines: string[]) => lines.filter((line) => /output-\d/.test(line));
@@ -187,13 +180,20 @@ test("full output paths stay visible and rendering preserves the original result
 	assert.deepEqual(original, before);
 });
 
-test("codemode highlights JavaScript without changing text, wrapping or preview limits", async () => {
+test("streamed JavaScript is highlighted in its first visible frame", () => {
+	settings();
+	const code = 'const progressiveCodemode = "first";';
+	const component = row(code, result(), false);
+	const line = component.render(100).find((line: string) => plain(line).includes("progressiveCodemode"));
+	assert.match(line, /\x1b\[38;2;\d+;\d+;\d+m"first"/, "strings have syntax color before arguments finish streaming");
+});
+
+test("codemode highlights JavaScript without changing text, wrapping or preview limits", () => {
 	settings(2);
 	const code = 'const highlighted = "ok";\n\n// comment\ntext(highlighted);';
 	const component = row(code);
-	const before = visible(component, 40);
-	await highlighted(component);
-	assert.deepEqual(visible(component, 40), before);
+	assert.equal(plain(component.rendererState._codemodeHighlight.text), code);
+	assert.ok(visible(component, 40).some((line) => /2 more lines/.test(line)));
 	component.setExpanded(true);
 	const lines = component.render(40) as string[];
 	assert.match(lines.find((line) => plain(line).includes("const highlighted"))!, /\x1b\[38;2;\d+;\d+;\d+mconst/);
@@ -201,48 +201,61 @@ test("codemode highlights JavaScript without changing text, wrapping or preview 
 	assert.ok(lines.every((line) => visibleWidth(line) <= 40));
 });
 
-test("identical calls share tokenization, including while pending; redraws and resizing reuse it", async (t) => {
+test("identical calls share tokenization during streaming; redraws and resizing reuse it", (t) => {
 	settings();
-	const { getSingletonHighlighter } = await import("shiki");
-	const tokenizer = t.mock.method(await getSingletonHighlighter(), "codeToTokensBase");
+	const tokenizer = t.mock.method(hljs, "highlight");
 	const code = 'const cachedCodemode = "shared";\ntext(cachedCodemode);';
-	const first = row(code);
+	const first = row(code, result(), false);
 	const second = row(code);
-	await Promise.all([highlighted(first), highlighted(second)]);
+	assert.equal(first.rendererState._codemodeHighlight.text, second.rendererState._codemodeHighlight.text);
 	for (let i = 0; i < 10; i++) {
 		first.updateResult(result(), false);
 		first.setExpanded(i % 2 === 0);
 		first.invalidate();
 		first.render(i % 2 === 0 ? 40 : 100);
 	}
-	await highlighted(row(code));
+	row(code);
 	assert.equal(tokenizer.mock.calls.filter((call) => call.arguments[0] === code).length, 1);
 });
 
-test("streaming arguments and hidden previews do not start highlighting", async (t) => {
+test("streaming keeps syntax colors through completion and hidden previews do not tokenize", async (t) => {
 	settings();
-	const { getSingletonHighlighter } = await import("shiki");
-	const tokenizer = t.mock.method(await getSingletonHighlighter(), "codeToTokensBase");
-	const code = 'const streamedCodemode = "complete";';
+	const tokenizer = t.mock.method(hljs, "highlight");
 	const component = row("const streamedCodemode =", result(), false);
-	component.updateArgs({ code });
-	assert.equal(component.rendererState._codemodeHighlight, undefined);
+	component.setExpanded(true);
+	const chunks = [
+		'const streamedCodemode = "incomplete',
+		'const streamedCodemode = "complete";',
+		'const streamedCodemode = "complete";\n/* comment\nstill comment',
+		'const streamedCodemode = "complete";\n/* comment\nstill comment */\ntext(`value: ${streamedCodemode}`);',
+	];
+	for (const code of chunks) {
+		component.updateArgs({ code });
+		const text = component.rendererState._codemodeHighlight.text;
+		assert.equal(plain(text), code, "every chunk is visible immediately without losing characters");
+		assert.match(text, /\x1b\[38;2;\d+;\d+;\d+mconst/);
+		assert.match(text, /\x1b\[38;2;\d+;\d+;\d+m"(?:incomplete|complete)/);
+		assert.equal(tokenizer.mock.calls.filter((call) => call.arguments[0] === code).length, 1);
+	}
+	const before = component.render(100);
 	component.setArgsComplete();
-	await highlighted(component);
-	assert.equal(tokenizer.mock.calls.filter((call) => call.arguments[0] === code).length, 1);
+	assert.deepEqual(component.render(100), before, "completion does not recolor the script");
+	await new Promise(setImmediate);
+	assert.deepEqual(component.render(100), before, "no delayed highlighter replaces the preview");
 
 	settings(0);
-	const hidden = row('const hiddenCodemode = "hidden";');
+	const hiddenCode = 'const hiddenCodemode = "hidden";';
+	const hidden = row(hiddenCode);
 	assert.equal(hidden.rendererState._codemodeHighlight, undefined);
+	assert.equal(tokenizer.mock.calls.filter((call) => call.arguments[0] === hiddenCode).length, 0);
 	hidden.setExpanded(true);
-	await highlighted(hidden);
 	assert.ok(visible(hidden).some((line) => line.includes("const hiddenCodemode")));
+	assert.equal(tokenizer.mock.calls.filter((call) => call.arguments[0] === hiddenCode).length, 1);
 });
 
-test("large scripts keep a readable preview without tokenization", async (t) => {
+test("large scripts keep a readable preview without tokenization", (t) => {
 	settings();
-	const { getSingletonHighlighter } = await import("shiki");
-	const tokenizer = t.mock.method(await getSingletonHighlighter(), "codeToTokensBase");
+	const tokenizer = t.mock.method(hljs, "highlight");
 	const code = '// large codemode script\n' + 'text("large");\n'.repeat(2500);
 	const component = row(code);
 	assert.equal(component.rendererState._codemodeHighlight, undefined);
@@ -250,38 +263,32 @@ test("large scripts keep a readable preview without tokenization", async (t) => 
 	assert.equal(tokenizer.mock.callCount(), 0);
 });
 
-test("code and theme changes discard stale highlighting", async () => {
+test("code and theme changes discard stale highlighting", () => {
 	settings();
 	const component = row('const oldCodemode = "old";');
 	component.updateArgs({ code: 'const newCodemode = "new";' });
-	await highlighted(component);
 	assert.ok(visible(component).some((line) => line.includes("newCodemode")));
 	assert.ok(!visible(component).some((line) => line.includes("oldCodemode")));
 	const dark = component.render(100).join("\n");
 	try {
 		setTheme("light", false);
 		component.invalidate();
-		await highlighted(component);
 		const light = component.render(100).join("\n");
 		assert.notEqual(light, dark);
 		const fresh = row('const newCodemode = "new";');
-		await highlighted(fresh);
 		assert.equal(light, fresh.render(100).join("\n"));
 	} finally {
 		setTheme("dark", false);
 	}
 });
 
-test("a tokenizer failure falls back to text and a later call retries", async (t) => {
+test("a tokenizer failure falls back to text and a later call retries", (t) => {
 	settings();
-	const { getSingletonHighlighter } = await import("shiki");
-	const tokenizer = t.mock.method(await getSingletonHighlighter(), "codeToTokensBase", () => { throw new Error("tokenizer unavailable"); });
+	const tokenizer = t.mock.method(hljs, "highlight", () => { throw new Error("tokenizer unavailable"); });
 	const code = 'const retryCodemode = "retry";';
 	const failed = row(code);
-	await highlighted(failed);
 	assert.ok(visible(failed).some((line) => line.includes(code)));
 	tokenizer.mock.restore();
 	const retried = row(code);
-	await highlighted(retried);
 	assert.match(retried.render(100).find((line: string) => plain(line).includes("const retryCodemode")), /\x1b\[38;2;\d+;\d+;\d+mconst/);
 });

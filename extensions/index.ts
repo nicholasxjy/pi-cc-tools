@@ -26,6 +26,7 @@ import {
 	createLsTool,
 	createReadTool,
 	createWriteTool,
+	highlightCode,
 } from "@earendil-works/pi-coding-agent";
 import {
 	Box,
@@ -6227,18 +6228,20 @@ async function codeToAnsiLazy(code: string, language: BundledLanguage, theme: Bu
 }
 
 const hlCache = new Map<string, Promise<string[]>>();
+const codemodeHighlightCache = new Map<string, string>();
 
 function clearHighlightCache(): void {
 	hlCache.clear();
+	codemodeHighlightCache.clear();
 }
 
-function touchCache(key: string, value: Promise<string[]>): Promise<string[]> {
-	hlCache.delete(key);
-	hlCache.set(key, value);
-	while (hlCache.size > CACHE_LIMIT) {
-		const first = hlCache.keys().next().value;
+function touchCache<T>(cache: Map<string, T>, key: string, value: T): T {
+	cache.delete(key);
+	cache.set(key, value);
+	while (cache.size > CACHE_LIMIT) {
+		const first = cache.keys().next().value;
 		if (first === undefined) break;
-		hlCache.delete(first);
+		cache.delete(first);
 	}
 	return value;
 }
@@ -6249,7 +6252,7 @@ async function hlBlock(code: string, language: BundledLanguage | undefined): Pro
 	const diffTheme = DIFF_THEME;
 	const key = `${diffThemeName(diffTheme)}\0${language}\0${code}`;
 	const hit = hlCache.get(key);
-	if (hit) return touchCache(key, hit);
+	if (hit) return touchCache(hlCache, key, hit);
 	// Cache the promise too, so identical previews share in-flight tokenization.
 	const pending = codeToAnsiLazy(code, language, diffTheme).then((raw) => {
 		// Themes generated from pi already meet pi's contrast rules for this background;
@@ -6260,7 +6263,7 @@ async function hlBlock(code: string, language: BundledLanguage | undefined): Pro
 		if (hlCache.get(key) === pending) hlCache.delete(key);
 		return code.split("\n");
 	});
-	return touchCache(key, pending);
+	return touchCache(hlCache, key, pending);
 }
 
 async function mapWithConcurrency<T, R>(items: T[], limit: number, mapItem: (item: T, index: number) => Promise<R>): Promise<R[]> {
@@ -7272,22 +7275,22 @@ class CodemodePreview extends ToolText {
 
 function codemodeCode(code: string, theme: Theme, ctx: any): string {
 	// shortcut: cap tokenization at MAX_HL_CHARS; highlight a visible prefix if larger scripts need color.
-	if (!ctx.argsComplete || code.length > MAX_HL_CHARS) {
+	if (code.length > MAX_HL_CHARS) {
 		ctx.state._codemodeHighlight = undefined;
-	} else {
-		const key = `${diffThemeName(DIFF_THEME)}\0${code}`;
-		if (ctx.state._codemodeHighlight?.key !== key) {
-			const entry = { key, text: undefined as string | undefined };
-			ctx.state._codemodeHighlight = entry;
-			void hlBlock(code, "javascript").then((lines) => {
-				if (ctx.state._codemodeHighlight !== entry) return;
-				entry.text = lines.join("\n");
-				safeInvalidate(ctx);
-			});
-		}
-		if (ctx.state._codemodeHighlight.text !== undefined) return ctx.state._codemodeHighlight.text;
+		return code.split("\n").map((line) => theme.fg("accent", line || " ")).join("\n");
 	}
-	return code.split("\n").map((line) => theme.fg("accent", line || " ")).join("\n");
+	const palette = [
+		"muted", "syntaxKeyword", "syntaxType", "syntaxNumber", "syntaxString", "syntaxComment",
+		"syntaxFunction", "syntaxPunctuation", "syntaxVariable", "syntaxOperator",
+	] as const;
+	const key = `${palette.map((token) => theme.getFgAnsi(token)).join("\0")}\0${code}`;
+	if (ctx.state._codemodeHighlight?.key !== key) {
+		// Use the same synchronous highlighter while streaming and after completion to avoid recoloring a whole block.
+		const text = codemodeHighlightCache.get(key) ?? highlightCode(code, "javascript").join("\n");
+		if (ANSI_PRESENT_RE.test(text)) touchCache(codemodeHighlightCache, key, text);
+		ctx.state._codemodeHighlight = { key, text };
+	}
+	return ctx.state._codemodeHighlight.text;
 }
 
 function renderCodemodeCall(args: any, theme: Theme, ctx: any): Container {
