@@ -5528,10 +5528,10 @@ function syncDiffShikiTheme(theme: any): void {
 function diffThemeName(theme: BundledTheme | ShikiThemeRegistration): string {
 	return typeof theme === "string" ? theme : theme.name;
 }
-const UNIVERSAL_DIFF_ADD_FG = { r: 110, g: 210, b: 130 };
-const UNIVERSAL_DIFF_DEL_FG = { r: 225, g: 110, b: 110 };
-const UNIVERSAL_DIFF_ADD_FG_LIGHT = { r: 26, g: 127, b: 55 };
-const UNIVERSAL_DIFF_DEL_FG_LIGHT = { r: 207, g: 34, b: 46 };
+const UNIVERSAL_DIFF_ADD_FG = { r: 136, g: 201, b: 153 };
+const UNIVERSAL_DIFF_DEL_FG = { r: 223, g: 146, b: 146 };
+const UNIVERSAL_DIFF_ADD_FG_LIGHT = { r: 48, g: 128, b: 80 };
+const UNIVERSAL_DIFF_DEL_FG_LIGHT = { r: 181, g: 74, b: 83 };
 
 function mixRgb(
 	a: { r: number; g: number; b: number },
@@ -5617,15 +5617,17 @@ function autoDeriveBgFromTheme(theme: any): void {
 
 	const addTint = mixRgb(addFgRgb, ADDITION_TINT_TARGET, 0.35);
 	const delTint = mixRgb(delFgRgb, DELETION_TINT_TARGET, 0.65);
+	// Keep fixed-palette tints subtle, especially against a light surface.
+	const tintScale = useTheme ? 1 : onLight ? 0.55 : 0.7;
 
 	FG_ADD = `\x1b[38;2;${Math.round(addFgRgb.r)};${Math.round(addFgRgb.g)};${Math.round(addFgRgb.b)}m`;
 	FG_DEL = `\x1b[38;2;${Math.round(delFgRgb.r)};${Math.round(delFgRgb.g)};${Math.round(delFgRgb.b)}m`;
-	BG_ADD = rgbToBgAnsi(mixRgb(base, addTint, 0.24));
-	BG_DEL = rgbToBgAnsi(mixRgb(base, delTint, 0.12));
-	BG_ADD_W = rgbToBgAnsi(mixRgb(base, addTint, 0.44));
-	BG_DEL_W = rgbToBgAnsi(mixRgb(base, delTint, 0.26));
-	BG_GUTTER_ADD = rgbToBgAnsi(mixRgb(base, addTint, 0.14));
-	BG_GUTTER_DEL = rgbToBgAnsi(mixRgb(base, delTint, 0.08));
+	BG_ADD = rgbToBgAnsi(mixRgb(base, addTint, 0.24 * tintScale));
+	BG_DEL = rgbToBgAnsi(mixRgb(base, delTint, 0.12 * tintScale));
+	BG_ADD_W = rgbToBgAnsi(mixRgb(base, addTint, 0.44 * tintScale));
+	BG_DEL_W = rgbToBgAnsi(mixRgb(base, delTint, 0.26 * tintScale));
+	BG_GUTTER_ADD = rgbToBgAnsi(mixRgb(base, addTint, 0.14 * tintScale));
+	BG_GUTTER_DEL = rgbToBgAnsi(mixRgb(base, delTint, 0.08 * tintScale));
 	BG_EMPTY = TRANSPARENT_BG;
 	BG_BASE = TRANSPARENT_BG;
 	D_RST = TRANSPARENT_RESET;
