@@ -32,7 +32,9 @@ const emit = async (name: string, event: any) => {
 };
 const plain = (text: string) => text.replace(/\x1b\[[0-9;]*m|\x1b\][^\x07]*\x07/g, "");
 
-test("default live thinking collapses when the answer starts", async () => {
+test("default live thinking collapses only when thinking ends", async (t) => {
+	const now = Date.now();
+	t.mock.method(Date, "now", () => now);
 	const message: any = { role: "assistant", content: [], stopReason: "pending" };
 	const component = new AssistantMessageComponent();
 	const render = () => component.render(100).map(plain).join("\n");
@@ -43,6 +45,9 @@ test("default live thinking collapses when the answer starts", async () => {
 	assert.match(render(), /Inspect the renderer/);
 
 	await emit("message_update", { message, assistantMessageEvent: { type: "thinking_end" } });
+	component.updateContent(message, true);
+	assert.match(render(), /Thought for 1s/, "thinking_end must collapse even within the same millisecond");
+	assert.doesNotMatch(render(), /Inspect the renderer/);
 	message.content.push({ type: "text", text: "The answer." });
 	await emit("message_update", { message, assistantMessageEvent: { type: "text_start" } });
 	component.updateContent(message, true);
@@ -119,4 +124,22 @@ test("clicking thinking toggles its visibility while streaming and after complet
 		click();
 		assert.equal(visible(component), original);
 	}
+});
+
+test("live thinking stays visible when the component receives a fresh streaming snapshot", async () => {
+	await setMode("live");
+	const component = new AssistantMessageComponent();
+	for (const thinking of ["First reasoning fragment.", "First reasoning fragment. Still thinking."]) {
+		// The UI's streaming flag is authoritative even without shared event metadata.
+		const snapshot = { role: "assistant", content: [{ type: "thinking", thinking }], stopReason: "stop" };
+		component.updateContent(snapshot, true);
+		const live = visible(component);
+		assert.ok(live.includes(thinking), live);
+		assert.doesNotMatch(live, /Thought for/, live);
+		component.invalidate();
+		assert.doesNotMatch(visible(component), /Thought for/, "a redraw must keep streaming thinking visible");
+	}
+	component.updateContent(component.lastMessage, false);
+	assert.match(visible(component), /Thought for 1s/);
+	assert.doesNotMatch(visible(component), /First reasoning fragment/);
 });
