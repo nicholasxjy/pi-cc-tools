@@ -37,6 +37,8 @@ Shell commands that only change files are drawn the same way. `sed -i`, `perl -p
 
 While a tool runs, the working line names it: `Running npm test…`, `Reading stats.py…`, `Searching for TODO…`, `Waiting for agent: Find edge cases…`. While the model thinks, it shows a playful verb instead. The token count covers everything the model writes for the request, including thinking and tool arguments, and counts up smoothly as text streams in.
 
+The terminal tab or window title also shows the latest execution step. It uses a declared `display.name` (such as Fabric's milestone) or `displaySummary` when available, otherwise the same tool activity descriptions as the working line. A named execution keeps its title while nested tools run. The title stays until the next step and is restored from the current branch on resume or reload. This runs only in interactive terminal sessions.
+
 ![The working line during a run](https://raw.githubusercontent.com/FammasMaz/pi-cc-tools/master/docs/media/spinner.gif)
 
 ## Bash labels
