@@ -1057,8 +1057,40 @@ function formatBranchedToolLines(
 	return output;
 }
 
+// Track live UI components without keeping detached transcripts in memory.
+class WeakComponentSet {
+	private refs = new WeakMap<object, WeakRef<any>>();
+	private entries = new Set<WeakRef<any>>();
+	private cleanup = new FinalizationRegistry<WeakRef<any>>((ref) => this.entries.delete(ref));
+
+	add(component: object): void {
+		if (this.refs.has(component)) return;
+		const ref = new WeakRef(component);
+		this.refs.set(component, ref);
+		this.entries.add(ref);
+		this.cleanup.register(component, ref, ref);
+	}
+
+	delete(component: object): void {
+		const ref = this.refs.get(component);
+		if (!ref) return;
+		this.entries.delete(ref);
+		this.refs.delete(component);
+		this.cleanup.unregister(ref);
+	}
+
+	*[Symbol.iterator](): IterableIterator<any> {
+		for (const ref of this.entries) {
+			const component = ref.deref();
+			if (component) yield component;
+			else this.entries.delete(ref);
+		}
+	}
+}
+
 const NON_GROUPABLE_TOOL_NAMES = new Set(["edit", "write", "apply_patch", "codemode"]);
-const ACTIVE_TOOL_GROUPS = new Set<any>();
+const ACTIVE_TOOL_GROUPS = new WeakComponentSet();
+const pendingThinkingMerges = new WeakSet<object>();
 
 function isGroupableTool(value: unknown): value is InstanceType<typeof ToolExecutionComponent> {
 	return value instanceof ToolExecutionComponent && !NON_GROUPABLE_TOOL_NAMES.has(getToolName(value)) && !isBashFileEditTool(value);
@@ -1443,6 +1475,7 @@ function isThinkingOnlyAssistantComponent(comp: unknown): comp is InstanceType<t
 }
 
 function maybeMergeConsecutiveThinkingMessages(parent: any): void {
+	if (!pendingThinkingMerges.delete(parent)) return;
 	const children = parent?.children;
 	if (!Array.isArray(children) || children.length < 2) return;
 
@@ -1479,6 +1512,7 @@ function maybeMergeConsecutiveThinkingMessages(parent: any): void {
 			i--;
 		}
 	}
+	pendingThinkingMerges.delete(parent);
 }
 
 // thinkingMode "latest": only the latest assistant message keeps its thinking. When a new one
@@ -1490,7 +1524,7 @@ const SUPERSEDED_KEY = Symbol.for("pi-claude-style-tools:superseded-assistant");
 const ADD_SEQ_KEY = Symbol.for("pi-claude-style-tools:add-seq");
 let addSequence = 0;
 /** Containers that hold assistant messages (pi's chat), for re-applying the thinking mode. */
-const CHAT_CONTAINERS = new Set<any>();
+const CHAT_CONTAINERS = new WeakComponentSet();
 
 function isAssistantMessageComponent(value: unknown): boolean {
 	return value instanceof AssistantMessageComponent || (value as any)?.constructor?.name === "AssistantMessageComponent";
@@ -1603,6 +1637,7 @@ function applyThinkingModeToChats(): void {
 			children.push(child);
 			maybeGroupToolComponent(parent, child);
 		}
+		pendingThinkingMerges.add(parent);
 	}
 }
 
@@ -1640,6 +1675,7 @@ function patchContainerParentTracking(): void {
 	const originalRemoveChild = proto.removeChild;
 	const originalClear = proto.clear;
 	proto.addChild = function patchedAddChild(component: any) {
+		pendingThinkingMerges.add(this);
 		const result = originalAddChild.call(this, component);
 		if (component && typeof component === "object") {
 			component[COMPONENT_PARENT] = this;
@@ -1651,11 +1687,13 @@ function patchContainerParentTracking(): void {
 		return result;
 	};
 	proto.removeChild = function patchedRemoveChild(component: any) {
+		pendingThinkingMerges.add(this);
 		const result = originalRemoveChild.call(this, component);
 		if (component && typeof component === "object" && component[COMPONENT_PARENT] === this) delete component[COMPONENT_PARENT];
 		return result;
 	};
 	proto.clear = function patchedClear() {
+		pendingThinkingMerges.delete(this);
 		for (const child of this.children ?? []) {
 			if (child && typeof child === "object" && child[COMPONENT_PARENT] === this) delete child[COMPONENT_PARENT];
 		}
@@ -3717,6 +3755,7 @@ function patchAssistantMessages(): void {
 		}
 	};
 	proto.updateContent = function patchedUpdateContentSuperseded(this: any, message: any, isStreaming?: boolean) {
+		if (this[COMPONENT_PARENT]) pendingThinkingMerges.add(this[COMPONENT_PARENT]);
 		if (!hidesSupersededThinking(this, message)) return renderContent.call(this, message, isStreaming);
 		// thinkingMode "latest": an earlier message renders as if it had no thinking.
 		const withoutThinking = { ...message, content: message.content.filter((block: any) => block?.type !== "thinking") };
@@ -3897,14 +3936,14 @@ function syncLiveToolRenderState(component: any): void {
 		isPartial: component?.isPartial === true,
 		executionStarted: component?.executionStarted === true,
 		isError: component?.result?.isError === true,
+		expanded: component?.expanded === true,
 	};
 	syncToolCallStatus(ctxLike);
 	if (component?.isPartial === true && component?.result) {
-		const raw = getTextContent(component.result).replace(/\r\n/g, "\n").trimEnd();
-		// tailLimit=0 → count-only (no line materialization) so huge bash tails stay cheap.
-		state._liveLineCount = collectNonEmptyLines(raw, 0).total;
+		state._liveLineCount = collectLiveToolLines(component.result, ctxLike.expanded, ctxLike).total;
 	} else if (component?.isPartial !== true) {
 		delete state._liveLineCount;
+		delete state._liveOutputCache;
 		// renderCall never sees the result, so hand a finished edit's details over: its diff is redrawn from them, not from
 		// the file. A call aborted while streaming ends with a bare error instead of a toolResult; it never drew a diff.
 		if (component?.toolName === "edit" && component.result && (!ctxLike.isError || component.result.role === "toolResult")) {
@@ -3934,9 +3973,7 @@ function patchToolRenderCacheInvalidation(): void {
 		if (typeof original !== "function") continue;
 		const run = function patchedToolMutation(this: any, ...args: any[]) {
 			clearToolRenderCache(this);
-			if (method === "updateDisplay" || method === "updateResult" || method === "invalidate") {
-				syncLiveToolRenderState(this);
-			}
+			if (method === "updateDisplay") syncLiveToolRenderState(this);
 			const result = original.apply(this, args);
 			clearToolRenderCache(this);
 			return result;
@@ -7354,7 +7391,7 @@ function getTextContent(result: any): string {
 		.join("\n");
 }
 
-function collectNonEmptyLines(text: string, tailLimit?: number): { lines: string[]; total: number } {
+function collectNonEmptyLines(text: string, tailLimit?: number, headLimit?: number): { lines: string[]; total: number } {
 	const keepTail = typeof tailLimit === "number" && Number.isFinite(tailLimit);
 	const limit = keepTail ? Math.max(0, Math.floor(tailLimit)) : 0;
 	const lines: string[] = [];
@@ -7367,7 +7404,7 @@ function collectNonEmptyLines(text: string, tailLimit?: number): { lines: string
 		if (line.trim().length > 0) {
 			total++;
 			if (!keepTail) {
-				lines.push(line);
+				if (headLimit === undefined || lines.length < headLimit) lines.push(line);
 			} else if (limit > 0) {
 				if (lines.length === limit) lines.shift();
 				lines.push(line);
@@ -7377,6 +7414,17 @@ function collectNonEmptyLines(text: string, tailLimit?: number): { lines: string
 		start = newline + 1;
 	}
 	return { lines, total };
+}
+
+function collectLiveToolLines(result: any, expanded: boolean, ctx: any): { lines: string[]; total: number } {
+	const text = getTextContent(result);
+	const limit = liveToolPreviewEnabled() ? (expanded ? expandedPreviewLimit() : liveToolPreviewLimit()) : 0;
+	const cached = ctx?.state?._liveOutputCache;
+	if (cached?.text === text && cached.expanded === expanded && cached.limit === limit) return cached.collected;
+	const raw = text.replace(/\r\n/g, "\n").trimEnd();
+	const collected = collectNonEmptyLines(raw, expanded && limit > 0 ? undefined : limit, expanded ? limit : undefined);
+	if (ctx?.state) ctx.state._liveOutputCache = { text, expanded, limit, collected };
+	return collected;
 }
 
 function lineCountLabel(count: number): string {
@@ -7405,9 +7453,7 @@ function runningPreviewBlock(
 		lines = options.lines;
 		totalLineCount = options.totalLineCount ?? lines.length;
 	} else {
-		// Single-pass collect; when collapsed only keep the preview window.
-		const raw = getTextContent(result).replace(/\r\n/g, "\n").trimEnd();
-		const collected = collectNonEmptyLines(raw, expanded ? undefined : limit);
+		const collected = collectLiveToolLines(result, expanded, ctx);
 		lines = collected.lines;
 		totalLineCount = collected.total;
 	}
@@ -9063,7 +9109,7 @@ export default function (pi: ExtensionAPI) {
 				}
 			}
 			if (isPartial) {
-				const preview = collectNonEmptyLines(output, expanded ? undefined : liveToolPreviewLimit());
+				const preview = collectLiveToolLines(result, expanded, ctx);
 				const running = runningPreviewBlock(result, "", expanded, theme, ctx, {
 					lines: preview.lines,
 					totalLineCount: preview.total,
