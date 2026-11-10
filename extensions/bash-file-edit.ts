@@ -278,6 +278,7 @@ export function detectBashFileEdit(command: string): BashFileEdit | undefined {
 	// In-place editors, possibly several in a row.
 	const inPlace: string[] = [];
 	let via: string | undefined;
+	const seenFiles = new Set<string>();
 	for (const segment of rest) {
 		const args = words(segment);
 		if (!args) {
@@ -291,7 +292,11 @@ export function detectBashFileEdit(command: string): BashFileEdit | undefined {
 		}
 		const tool = args[0] === "perl" ? "perl" : "sed";
 		via = via && via !== tool ? "shell" : tool;
-		for (const file of files) if (!inPlace.includes(file)) inPlace.push(file);
+		for (const file of files) {
+			if (seenFiles.has(file)) continue;
+			seenFiles.add(file);
+			inPlace.push(file);
+		}
 	}
 	if (inPlace.length > 0) return { kind: "edit", via: via ?? "sed", paths: inPlace, ...(cd ? { cd } : {}) };
 

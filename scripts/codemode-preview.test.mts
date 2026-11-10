@@ -440,3 +440,22 @@ test("Fabric's MCP description does not replace its definition; other MCP tools 
 	assert.equal(tools.get("fabric_exec").execute, fabricDefinition.execute);
 	assert.equal(tools.get("fabric_exec").modelOnly, true);
 });
+
+
+test("large completed output reuses its preview and retains only visible rendered rows", () => {
+	settings(5);
+	const text = Array.from({ length: 20_000 }, (_, i) => `bounded-output-${i}`).join("\n");
+	const component = fabricRow({ code: "return 1;" }, fabricResult(text));
+	const first = component.render(100);
+	const preview = component.resultRendererComponent.children[1];
+	assert.equal(preview.toolCachedLines.length, 5, "hidden padded rows must not remain in the layout cache");
+	for (let i = 0; i < 5; i++) {
+		component.invalidate();
+		assert.deepEqual(component.render(100), first);
+		assert.equal(component.resultRendererComponent.children[1], preview, "unchanged output reuses its layout");
+	}
+	assert.ok(visible(component).some((line) => /19995 more lines/.test(line)));
+	component.updateResult(fabricResult("changed-output"), false);
+	assert.ok(visible(component).some((line) => /changed-output/.test(line)));
+	assert.ok(!visible(component).some((line) => /bounded-output/.test(line)));
+});

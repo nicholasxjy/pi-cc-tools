@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { register } from "node:module";
 
 import "./ts-resolve-loader.mjs";
@@ -8,6 +11,18 @@ register("./ts-resolve-loader.mjs", import.meta.url);
 // Direct MCP tools (`mcp__<server>__<tool>`) must name the tool in their header, and a
 // running row must draw its call once: the first pending blink used to invalidate the
 // row from inside its own updateDisplay, leaving the call region in the box twice.
+const agentDir = mkdtempSync(join(tmpdir(), "mcp-running-row-"));
+const previousCwd = process.cwd();
+const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+process.chdir(agentDir);
+process.env.PI_CODING_AGENT_DIR = agentDir;
+writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ terminalTheme: false, groupToolCalls: true }));
+test.after(() => {
+	process.chdir(previousCwd);
+	if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+	else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+	rmSync(agentDir, { recursive: true, force: true });
+});
 const { ToolExecutionComponent } = await import("@earendil-works/pi-coding-agent");
 const { Container } = await import("@earendil-works/pi-tui");
 const { initTheme } = await import("../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js");

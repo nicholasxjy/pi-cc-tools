@@ -79,6 +79,7 @@ const thinking = new AssistantMessageComponent({
 	stopReason: "stop",
 }, false);
 thinking.updateContent(thinking.lastMessage, false);
+thinking.setHideThinkingBlock(false);
 const bash = extensions[0].tools.get("bash");
 const tool = new ToolExecutionComponent("bash", "copy-bash", { command: "ls" }, undefined, bash?.definition ?? bash, { requestRender() {} }, process.cwd());
 tool.updateResult({ content: [{ type: "text", text: "file1\nfile2" }], isError: false }, false);

@@ -1,0 +1,349 @@
+{
+  "baseRevision": "4c32f8f",
+  "runsPerVersion": 3,
+  "command": "node --experimental-strip-types scripts/benchmark-performance.mts",
+  "before": [
+    {
+      "node": "v26.13.0",
+      "platform": "darwin/arm64",
+      "width": 100,
+      "retainedPreviewRows": 20000,
+      "results": [
+        {
+          "name": "running-group-200-warm",
+          "iterations": 200,
+          "msPerOperation": 1.0384029149999991,
+          "cpuMsPerOperation": 0.54816
+        },
+        {
+          "name": "append-to-20000-lines",
+          "iterations": 100,
+          "msPerOperation": 1.6064862500000003,
+          "cpuMsPerOperation": 0.87721
+        },
+        {
+          "name": "fabric-20000-lines-first",
+          "iterations": 1,
+          "msPerOperation": 493.84641699999975,
+          "cpuMsPerOperation": 308.043
+        },
+        {
+          "name": "fabric-20000-lines-invalidate",
+          "iterations": 5,
+          "msPerOperation": 314.27699160000003,
+          "cpuMsPerOperation": 248.0902
+        },
+        {
+          "name": "replace-5000-unrelated-words",
+          "iterations": 1,
+          "msPerOperation": 3306.5465409999997,
+          "cpuMsPerOperation": 3155.381
+        },
+        {
+          "name": "replace-1500-lines",
+          "iterations": 1,
+          "msPerOperation": 221.12575000000015,
+          "cpuMsPerOperation": 230.398
+        }
+      ]
+    },
+    {
+      "node": "v26.13.0",
+      "platform": "darwin/arm64",
+      "width": 100,
+      "retainedPreviewRows": 20000,
+      "results": [
+        {
+          "name": "running-group-200-warm",
+          "iterations": 200,
+          "msPerOperation": 0.3878891699999997,
+          "cpuMsPerOperation": 0.6950799999999999
+        },
+        {
+          "name": "append-to-20000-lines",
+          "iterations": 100,
+          "msPerOperation": 0.7688879100000008,
+          "cpuMsPerOperation": 0.80923
+        },
+        {
+          "name": "fabric-20000-lines-first",
+          "iterations": 1,
+          "msPerOperation": 228.25512500000013,
+          "cpuMsPerOperation": 280.621
+        },
+        {
+          "name": "fabric-20000-lines-invalidate",
+          "iterations": 5,
+          "msPerOperation": 216.9157834,
+          "cpuMsPerOperation": 230.69459999999998
+        },
+        {
+          "name": "replace-5000-unrelated-words",
+          "iterations": 1,
+          "msPerOperation": 2947.7509159999995,
+          "cpuMsPerOperation": 2988.478
+        },
+        {
+          "name": "replace-1500-lines",
+          "iterations": 1,
+          "msPerOperation": 219.60199999999986,
+          "cpuMsPerOperation": 228.5
+        }
+      ]
+    },
+    {
+      "node": "v26.13.0",
+      "platform": "darwin/arm64",
+      "width": 100,
+      "retainedPreviewRows": 20000,
+      "results": [
+        {
+          "name": "running-group-200-warm",
+          "iterations": 200,
+          "msPerOperation": 0.35750208499999986,
+          "cpuMsPerOperation": 0.53269
+        },
+        {
+          "name": "append-to-20000-lines",
+          "iterations": 100,
+          "msPerOperation": 0.7178312500000004,
+          "cpuMsPerOperation": 0.7547799999999999
+        },
+        {
+          "name": "fabric-20000-lines-first",
+          "iterations": 1,
+          "msPerOperation": 230.299709,
+          "cpuMsPerOperation": 287.181
+        },
+        {
+          "name": "fabric-20000-lines-invalidate",
+          "iterations": 5,
+          "msPerOperation": 214.78185000000002,
+          "cpuMsPerOperation": 230.29879999999997
+        },
+        {
+          "name": "replace-5000-unrelated-words",
+          "iterations": 1,
+          "msPerOperation": 2947.0598750000004,
+          "cpuMsPerOperation": 2994.237
+        },
+        {
+          "name": "replace-1500-lines",
+          "iterations": 1,
+          "msPerOperation": 221.2762499999999,
+          "cpuMsPerOperation": 230.18
+        }
+      ]
+    }
+  ],
+  "after": [
+    {
+      "node": "v26.13.0",
+      "platform": "darwin/arm64",
+      "width": 100,
+      "retainedPreviewRows": 5,
+      "results": [
+        {
+          "name": "running-group-200-warm",
+          "iterations": 200,
+          "msPerOperation": 0.0022183350000000244,
+          "cpuMsPerOperation": 0.01204
+        },
+        {
+          "name": "append-to-20000-lines",
+          "iterations": 100,
+          "msPerOperation": 0.41018000000000027,
+          "cpuMsPerOperation": 0.43734
+        },
+        {
+          "name": "fabric-20000-lines-first",
+          "iterations": 1,
+          "msPerOperation": 12.921040999999946,
+          "cpuMsPerOperation": 17.392
+        },
+        {
+          "name": "fabric-20000-lines-invalidate",
+          "iterations": 5,
+          "msPerOperation": 0.34272499999999584,
+          "cpuMsPerOperation": 0.4006
+        },
+        {
+          "name": "replace-5000-unrelated-words",
+          "iterations": 1,
+          "msPerOperation": 5.3158750000000055,
+          "cpuMsPerOperation": 9.391
+        },
+        {
+          "name": "replace-1500-lines",
+          "iterations": 1,
+          "msPerOperation": 6.341374999999971,
+          "cpuMsPerOperation": 10.558
+        }
+      ]
+    },
+    {
+      "node": "v26.13.0",
+      "platform": "darwin/arm64",
+      "width": 100,
+      "retainedPreviewRows": 5,
+      "results": [
+        {
+          "name": "running-group-200-warm",
+          "iterations": 200,
+          "msPerOperation": 0.0023843750000003185,
+          "cpuMsPerOperation": 0.011049999999999999
+        },
+        {
+          "name": "append-to-20000-lines",
+          "iterations": 100,
+          "msPerOperation": 0.38323375000000054,
+          "cpuMsPerOperation": 0.46853
+        },
+        {
+          "name": "fabric-20000-lines-first",
+          "iterations": 1,
+          "msPerOperation": 13.004500000000007,
+          "cpuMsPerOperation": 17.575
+        },
+        {
+          "name": "fabric-20000-lines-invalidate",
+          "iterations": 5,
+          "msPerOperation": 0.3065918000000011,
+          "cpuMsPerOperation": 0.3574
+        },
+        {
+          "name": "replace-5000-unrelated-words",
+          "iterations": 1,
+          "msPerOperation": 4.773166999999944,
+          "cpuMsPerOperation": 8.229
+        },
+        {
+          "name": "replace-1500-lines",
+          "iterations": 1,
+          "msPerOperation": 6.594124999999963,
+          "cpuMsPerOperation": 11.697
+        }
+      ]
+    },
+    {
+      "node": "v26.13.0",
+      "platform": "darwin/arm64",
+      "width": 100,
+      "retainedPreviewRows": 5,
+      "results": [
+        {
+          "name": "running-group-200-warm",
+          "iterations": 200,
+          "msPerOperation": 0.002211669999999799,
+          "cpuMsPerOperation": 0.0076500000000000005
+        },
+        {
+          "name": "append-to-20000-lines",
+          "iterations": 100,
+          "msPerOperation": 0.37765083000000005,
+          "cpuMsPerOperation": 0.46568
+        },
+        {
+          "name": "fabric-20000-lines-first",
+          "iterations": 1,
+          "msPerOperation": 13.126292000000035,
+          "cpuMsPerOperation": 17.481
+        },
+        {
+          "name": "fabric-20000-lines-invalidate",
+          "iterations": 5,
+          "msPerOperation": 0.3169084000000112,
+          "cpuMsPerOperation": 0.3738
+        },
+        {
+          "name": "replace-5000-unrelated-words",
+          "iterations": 1,
+          "msPerOperation": 4.671875,
+          "cpuMsPerOperation": 8.887
+        },
+        {
+          "name": "replace-1500-lines",
+          "iterations": 1,
+          "msPerOperation": 7.002416999999923,
+          "cpuMsPerOperation": 11.084
+        }
+      ]
+    }
+  ],
+  "comparison": [
+    {
+      "scenario": "running-group-200-warm",
+      "beforeMedianMs": 0.3878891699999997,
+      "afterMedianMs": 0.0022183350000000244,
+      "speedup": 174.85599334635904,
+      "reductionPercent": 99.4281008154984,
+      "beforeMedianCpuMs": 0.54816,
+      "afterMedianCpuMs": 0.011049999999999999
+    },
+    {
+      "scenario": "append-to-20000-lines",
+      "beforeMedianMs": 0.7688879100000008,
+      "afterMedianMs": 0.38323375000000054,
+      "speedup": 2.006315753766467,
+      "reductionPercent": 50.15739680443146,
+      "beforeMedianCpuMs": 0.80923,
+      "afterMedianCpuMs": 0.46568
+    },
+    {
+      "scenario": "fabric-20000-lines-first",
+      "beforeMedianMs": 230.299709,
+      "afterMedianMs": 13.004500000000007,
+      "speedup": 17.709232111961235,
+      "reductionPercent": 94.35322777589789,
+      "beforeMedianCpuMs": 287.181,
+      "afterMedianCpuMs": 17.481
+    },
+    {
+      "scenario": "fabric-20000-lines-invalidate",
+      "beforeMedianMs": 216.9157834,
+      "afterMedianMs": 0.3169084000000112,
+      "speedup": 684.4747043624983,
+      "reductionPercent": 99.85390256299809,
+      "beforeMedianCpuMs": 230.69459999999998,
+      "afterMedianCpuMs": 0.3738
+    },
+    {
+      "scenario": "replace-5000-unrelated-words",
+      "beforeMedianMs": 2947.7509159999995,
+      "afterMedianMs": 4.773166999999944,
+      "speedup": 617.5671029318761,
+      "reductionPercent": 99.83807427642235,
+      "beforeMedianCpuMs": 2994.237,
+      "afterMedianCpuMs": 8.887
+    },
+    {
+      "scenario": "replace-1500-lines",
+      "beforeMedianMs": 221.12575000000015,
+      "afterMedianMs": 6.594124999999963,
+      "speedup": 33.533751634978316,
+      "reductionPercent": 97.01792984308703,
+      "beforeMedianCpuMs": 230.18,
+      "afterMedianCpuMs": 11.084
+    }
+  ],
+  "environment": {
+    "node": "v26.13.0",
+    "platform": "darwin/arm64",
+    "agentUnitTests": "0.79.10",
+    "tuiUnitTests": "0.79.1",
+    "agentFullscreenTests": "1.5.1",
+    "width": 100
+  },
+  "recordedAt": "2026-11-10T12:52:29.456697+00:00",
+  "verification": {
+    "unitTests": {
+      "passed": 213,
+      "failed": 0
+    },
+    "typecheck": "passed",
+    "diffCheck": "passed",
+    "packDryRun": "passed",
+    "fullscreenMouse": "passed with Pi 1.5.1",
+    "fullscreenCopy": "passed with Pi 1.5.1"
+  }
+}

@@ -1166,9 +1166,9 @@ class ToolGroupComponent extends Container {
 	private cachedEpoch?: number;
 	private cachedMode?: string;
 	private cachedExpanded?: boolean;
-	private cachedBlinkPhase?: boolean;
-	private cachedStatusKey?: string;
-	private cachedToolCount?: number;
+	private cachedBlinkPhase?: number;
+	private cachedElapsed?: string;
+	private cachedAgentLive?: boolean;
 	private cachedLines?: string[];
 	private paletteFingerprint?: string;
 	/** When the group's current run started, for the "· 3s" on a running header. */
@@ -1181,33 +1181,9 @@ class ToolGroupComponent extends Container {
 		this.cachedMode = undefined;
 		this.cachedExpanded = undefined;
 		this.cachedBlinkPhase = undefined;
-		this.cachedStatusKey = undefined;
-		this.cachedToolCount = undefined;
+		this.cachedElapsed = undefined;
+		this.cachedAgentLive = undefined;
 		this.cachedLines = undefined;
-	}
-
-	private statusSnapshot(): { key: string; pending: number; success: number; error: number } {
-		// Status counts + per-tool identity/expanded/partial bits detect membership
-		// and completion changes without walking full child render output. Child
-		// content changes still reach us via clearToolRenderCache → invalidate().
-		const counts = countToolStatuses(this.tools);
-		let idBits = "";
-		for (let i = 0; i < this.tools.length; i++) {
-			const tool = this.tools[i];
-			const id = typeof tool?.toolCallId === "string" ? tool.toolCallId : getToolName(tool);
-			const flags = (tool?.isPartial === true ? 1 : 0)
-				| (tool?.result?.isError ? 2 : 0)
-				| (tool?.expanded ? 4 : 0)
-				| (tool?.argsComplete ? 8 : 0)
-				| (tool?.executionStarted ? 16 : 0);
-			idBits += `${id}:${flags},`;
-		}
-		return {
-			key: `${this.tools.length}:${counts.pending}:${counts.success}:${counts.error}:${idBits}`,
-			pending: counts.pending,
-			success: counts.success,
-			error: counts.error,
-		};
 	}
 
 	addTool(tool: any): void {
@@ -1276,7 +1252,7 @@ class ToolGroupComponent extends Container {
 			return [];
 		}
 		const safeWidth = Number.isFinite(width) ? Math.max(1, Math.floor(width)) : 1;
-		// Fast path: settled groups with a valid memo skip ALL child walks.
+		// Unchanged groups reuse their layout until content, time or animation changes.
 		// Remember the palette this group was drawn with (see invalidate()).
 		if (this.paletteFingerprint === undefined) this.paletteFingerprint = currentThemePaletteFingerprint();
 		// Child mutations mark dirty via clearToolRenderCache → invalidate().
@@ -1287,15 +1263,17 @@ class ToolGroupComponent extends Container {
 			&& this.cachedEpoch === _toolBranchVisualEpoch
 			&& this.cachedMode === toolBackgroundMode
 			&& this.cachedExpanded === this.expanded
+			&& (this.runStartedAt === undefined || (
+				this.cachedAgentLive === (currentAgentWorkStartMs !== undefined)
+				&& this.cachedBlinkPhase === _globalBlinkPhaseIndex
+				&& this.cachedElapsed === formatElapsedSeconds(Date.now() - this.runStartedAt)
+			))
 		) {
 			return applyGroupHover(this.cachedLines, this.mouseLayout, (this as any)[GROUP_HOVER_KEY]);
 		}
 
-		const status = this.statusSnapshot();
-		// Only memoize fully-settled groups. Pending groups must recompute so
-		// blink dots and live partial child content stay fresh. Long chats are
-		// almost entirely settled history, which is the expensive warm path.
-		const canCache = status.pending === 0;
+		const status = countToolStatuses(this.tools);
+		// Child updates invalidate the group; time and animation are part of its cache key.
 
 		const groupedName = getGroupedToolName(this.tools);
 		const label = getToolGroupLabel(this.tools);
@@ -1372,19 +1350,15 @@ class ToolGroupComponent extends Container {
 		rememberMouseLayout(this, safeWidth, mouseChildren);
 
 		// Final clamp already applied per-line above; avoid a second full pass.
-		if (canCache) {
-			this.dirty = false;
-			this.cachedWidth = safeWidth;
-			this.cachedEpoch = _toolBranchVisualEpoch;
-			this.cachedMode = toolBackgroundMode;
-			this.cachedExpanded = this.expanded;
-			this.cachedBlinkPhase = true;
-			this.cachedStatusKey = status.key;
-			this.cachedToolCount = total;
-			this.cachedLines = lines;
-		} else {
-			this.clearRenderCache();
-		}
+		this.dirty = false;
+		this.cachedWidth = safeWidth;
+		this.cachedEpoch = _toolBranchVisualEpoch;
+		this.cachedMode = toolBackgroundMode;
+		this.cachedExpanded = this.expanded;
+		this.cachedBlinkPhase = _globalBlinkPhaseIndex;
+		this.cachedElapsed = this.runStartedAt === undefined ? undefined : formatElapsedSeconds(Date.now() - this.runStartedAt);
+		this.cachedAgentLive = currentAgentWorkStartMs !== undefined;
+		this.cachedLines = lines;
 		return applyGroupHover(lines, this.mouseLayout, (this as any)[GROUP_HOVER_KEY]);
 	}
 }
@@ -4485,9 +4459,8 @@ function toolStatusDot(ctx: any, theme: Theme): string {
 const BRANCH_INDENT = "  ";
 
 function branchIndent(text: string, continued = false, theme?: Theme): string {
-	const rule = currentToolBranchAnsi(theme);
 	// Align under bare `├ `/`└ ` (│ + one space, or two spaces when closed).
-	const prefix = continued ? `${rule}│${TRANSPARENT_RESET} ` : "  ";
+	const prefix = continued ? `${currentToolBranchAnsi(theme)}│${TRANSPARENT_RESET} ` : "  ";
 	return `${BRANCH_INDENT}${prefix}${WRAP_MARK}${text}`;
 }
 
@@ -4836,6 +4809,9 @@ class ToolText extends Text {
 	private toolCachedValue?: string;
 	private toolCachedWidth?: number;
 	private toolCachedLines?: string[];
+	protected renderLimit = Infinity;
+	protected totalLines = 0;
+	private toolCachedLimit?: number;
 	private observedWidth?: number;
 	private pendingObservedWidth?: number;
 	getObservedWidth(): number | undefined {
@@ -4876,9 +4852,7 @@ class ToolText extends Text {
 	}
 
 	invalidate(): void {
-		this.toolCachedValue = undefined;
-		this.toolCachedWidth = undefined;
-		this.toolCachedLines = undefined;
+		// Layout is keyed by text, width, preview limit and palette; unchanged inputs remain valid.
 	}
 
 	render(width: number): string[] {
@@ -4888,10 +4862,12 @@ class ToolText extends Text {
 			this.toolCachedLines
 			&& this.toolCachedValue === this.value
 			&& this.toolCachedWidth === width
+			&& this.toolCachedLimit === this.renderLimit
 			&& (this as any)._toolBranchCacheKey === branchKey
 			&& (this as any)._toolBranchCacheEpoch === _toolBranchVisualEpoch
 		) return this.toolCachedLines;
 		if (!this.value || this.value.trim() === "") {
+			this.totalLines = 0;
 			this.toolCachedValue = this.value;
 			this.toolCachedWidth = width;
 			this.toolCachedLines = [];
@@ -4899,9 +4875,25 @@ class ToolText extends Text {
 		}
 		const contentWidth = Math.max(1, width);
 		const lines = this.value.replace(/\t/g, "   ").split("\n");
-		const rendered = lines
-			.flatMap((line) => wrapMarkedLine(line, contentWidth))
-			.map((line) => padToWidth(line, width));
+		const rendered: string[] = [];
+		this.totalLines = 0;
+		for (const line of lines) {
+			if (rendered.length >= this.renderLimit) {
+				const plain = stripAnsi(line).replace(WRAP_MARK, "");
+				const columns = ASCII_PLAIN_RE.test(plain) ? plain.length : visibleWidth(plain);
+				if (line.includes(CLIP_MARK) || columns <= contentWidth) {
+					this.totalLines++;
+					continue;
+				}
+			}
+			const wrapped = wrapMarkedLine(line, contentWidth);
+			this.totalLines += wrapped.length;
+			for (const part of wrapped) {
+				if (rendered.length >= this.renderLimit) break;
+				rendered.push(padToWidth(part, width));
+			}
+		}
+		this.toolCachedLimit = this.renderLimit;
 		this.toolCachedValue = this.value;
 		this.toolCachedWidth = width;
 		this.toolCachedLines = rendered;
@@ -5338,6 +5330,9 @@ const MAX_HL_CHARS = 32_000;
 const CACHE_LIMIT = 48;
 const DIFF_RENDER_CONCURRENCY = 2;
 const WORD_DIFF_MIN_SIM = 0.15;
+const WORD_DIFF_MAX_CHARS = 8192;
+const WORD_DIFF_MAX_EDITS = 128;
+const LINE_DIFF_MAX_EDITS = 256;
 const MAX_WRAP_ROWS_WIDE = 3;
 const MAX_WRAP_ROWS_MED = 2;
 const MAX_WRAP_ROWS_NARROW = 1;
@@ -5931,6 +5926,7 @@ interface ParsedDiff {
 	added: number;
 	removed: number;
 	chars: number;
+	simplified?: boolean;
 }
 
 function diffStrip(value: string): string {
@@ -6350,7 +6346,29 @@ async function mapWithConcurrency<T, R>(items: T[], limit: number, mapItem: (ite
 }
 
 function parseDiff(oldContent: string, newContent: string, ctxLines = 3): ParsedDiff {
-	const patch = Diff.structuredPatch("", "", oldContent, newContent, "", "", { context: ctxLines });
+	const patch = Diff.structuredPatch("", "", oldContent, newContent, "", "", { context: ctxLines, maxEditLength: LINE_DIFF_MAX_EDITS });
+	if (!patch) {
+		// Bound display-only comparison; a coarse replacement still preserves all changed text.
+		const oldLines = oldContent.split("\n");
+		const newLines = newContent.split("\n");
+		if (oldLines.at(-1) === "") oldLines.pop();
+		if (newLines.at(-1) === "") newLines.pop();
+		let start = 0;
+		while (start < oldLines.length && start < newLines.length && oldLines[start] === newLines[start]) start++;
+		let oldEnd = oldLines.length;
+		let newEnd = newLines.length;
+		while (oldEnd > start && newEnd > start && oldLines[oldEnd - 1] === newLines[newEnd - 1]) { oldEnd--; newEnd--; }
+		const lines: DiffLine[] = [];
+		for (let i = Math.max(0, start - ctxLines); i < start; i++) {
+			lines.push({ type: "ctx", oldNum: i + 1, newNum: i + 1, content: oldLines[i] });
+		}
+		for (let i = start; i < oldEnd; i++) lines.push({ type: "del", oldNum: i + 1, newNum: null, content: oldLines[i] });
+		for (let i = start; i < newEnd; i++) lines.push({ type: "add", oldNum: null, newNum: i + 1, content: newLines[i] });
+		for (let i = 0; i < Math.min(ctxLines, oldLines.length - oldEnd); i++) {
+			lines.push({ type: "ctx", oldNum: oldEnd + i + 1, newNum: newEnd + i + 1, content: oldLines[oldEnd + i] });
+		}
+		return { lines, added: newEnd - start, removed: oldEnd - start, chars: oldContent.length + newContent.length, simplified: true };
+	}
 	const lines: DiffLine[] = [];
 	let added = 0;
 	let removed = 0;
@@ -6398,7 +6416,9 @@ function wordDiffAnalysis(
 	newText: string,
 ): { similarity: number; oldRanges: Array<[number, number]>; newRanges: Array<[number, number]> } {
 	if (!oldText && !newText) return { similarity: 1, oldRanges: [], newRanges: [] };
-	const parts = Diff.diffWords(oldText, newText);
+	const parts = oldText.length + newText.length <= WORD_DIFF_MAX_CHARS
+		? Diff.diffWords(oldText, newText, { maxEditLength: WORD_DIFF_MAX_EDITS }) : undefined;
+	if (!parts) return { similarity: 0, oldRanges: [], newRanges: [] };
 	const oldRanges: Array<[number, number]> = [];
 	const newRanges: Array<[number, number]> = [];
 	let oldPos = 0;
@@ -6453,21 +6473,6 @@ function injectBg(ansiLine: string, ranges: Array<[number, number]>, baseBg: str
 	return out + D_RST;
 }
 
-function plainWordDiff(oldText: string, newText: string): { old: string; new: string } {
-	const parts = Diff.diffWords(oldText, newText);
-	let oldOut = "";
-	let newOut = "";
-	for (const part of parts) {
-		if (part.removed) oldOut += `${BG_DEL_W}${part.value}${D_RST}${BG_DEL}`;
-		else if (part.added) newOut += `${BG_ADD_W}${part.value}${D_RST}${BG_ADD}`;
-		else {
-			oldOut += part.value;
-			newOut += part.value;
-		}
-	}
-	return { old: oldOut, new: newOut };
-}
-
 async function renderUnified(
 	diff: ParsedDiff,
 	language: BundledLanguage | undefined,
@@ -6497,6 +6502,7 @@ async function renderUnified(
 	let newIndex = 0;
 	let index = 0;
 	const out: string[] = [diffRule(tw)];
+	if (diff.simplified) out.push(`${FG_DIM}(large change: simplified line diff)${D_RST}`);
 
 	function emitRow(num: number | null, sign: string, gutterBg: string, signFg: string, body: string, bodyBg = ""): void {
 		const borderFg = sign === "-" ? dc.fgDel : sign === "+" ? dc.fgAdd : "";
@@ -6546,15 +6552,9 @@ async function renderUnified(
 
 		const isPaired = dels.length === 1 && adds.length === 1;
 		const wd = isPaired ? wordDiffAnalysis(dels[0].l.content, adds[0].l.content) : null;
-		if (isPaired && wd && wd.similarity >= WORD_DIFF_MIN_SIM && canHL) {
+		if (isPaired && wd && wd.similarity >= WORD_DIFF_MIN_SIM) {
 			emitRow(dels[0].l.oldNum, "-", BG_GUTTER_DEL, `${dc.fgDel}${D_BOLD}`, injectBg(dels[0].hl, wd.oldRanges, BG_DEL, BG_DEL_W), BG_DEL);
 			emitRow(adds[0].l.newNum, "+", BG_GUTTER_ADD, `${dc.fgAdd}${D_BOLD}`, injectBg(adds[0].hl, wd.newRanges, BG_ADD, BG_ADD_W), BG_ADD);
-			continue;
-		}
-		if (isPaired && wd && wd.similarity >= WORD_DIFF_MIN_SIM && !canHL) {
-			const pwd = plainWordDiff(dels[0].l.content, adds[0].l.content);
-			emitRow(dels[0].l.oldNum, "-", BG_GUTTER_DEL, `${dc.fgDel}${D_BOLD}`, `${BG_DEL}${pwd.old}`, BG_DEL);
-			emitRow(adds[0].l.newNum, "+", BG_GUTTER_ADD, `${dc.fgAdd}${D_BOLD}`, `${BG_ADD}${pwd.new}`, BG_ADD);
 			continue;
 		}
 		for (const d of dels) emitRow(d.l.oldNum, "-", BG_GUTTER_DEL, `${dc.fgDel}${D_BOLD}`, `${BG_DEL}${canHL ? d.hl : d.l.content}`, BG_DEL);
@@ -6578,24 +6578,29 @@ async function renderSplit(
 	if (!diff.lines.length) return "";
 
 	type Row = { left: DiffLine | null; right: DiffLine | null };
-	const rows: Row[] = [];
+	const vis: Row[] = [];
+	let totalRows = 0;
 	let i = 0;
 	while (i < diff.lines.length) {
 		const line = diff.lines[i];
 		if (line.type === "sep" || line.type === "ctx") {
-			rows.push({ left: line, right: line });
+			if (vis.length < max) vis.push({ left: line, right: line });
+			totalRows++;
 			i++;
 			continue;
 		}
-		const dels: DiffLine[] = [];
-		const adds: DiffLine[] = [];
-		while (i < diff.lines.length && diff.lines[i].type === "del") dels.push(diff.lines[i++]);
-		while (i < diff.lines.length && diff.lines[i].type === "add") adds.push(diff.lines[i++]);
-		const n = Math.max(dels.length, adds.length);
-		for (let j = 0; j < n; j++) rows.push({ left: dels[j] ?? null, right: adds[j] ?? null });
+		const delStart = i;
+		while (i < diff.lines.length && diff.lines[i].type === "del") i++;
+		const addStart = i;
+		while (i < diff.lines.length && diff.lines[i].type === "add") i++;
+		const deleted = addStart - delStart;
+		const added = i - addStart;
+		const count = Math.max(deleted, added);
+		for (let j = 0, shown = Math.min(count, max - vis.length); j < shown; j++) {
+			vis.push({ left: j < deleted ? diff.lines[delStart + j] : null, right: j < added ? diff.lines[addStart + j] : null });
+		}
+		totalRows += count;
 	}
-
-	const vis = rows.slice(0, max);
 	const half = Math.floor((tw - 1) / 2);
 	const nw = Math.max(2, String(maxLineNumber(diff.lines)).length);
 	const gw = nw + 5;
@@ -6672,15 +6677,9 @@ async function renderSplit(
 		const wd = paired && leftLine && rightLine ? wordDiffAnalysis(leftLine.content, rightLine.content) : null;
 		let leftResult: HalfResult;
 		let rightResult: HalfResult;
-		if (paired && wd && leftLine && rightLine && wd.similarity >= WORD_DIFF_MIN_SIM && canHL) {
+		if (paired && wd && leftLine && rightLine && wd.similarity >= WORD_DIFF_MIN_SIM) {
 			leftResult = halfBuild(leftLine, leftHL[leftIndex++] ?? leftLine.content, wd.oldRanges, "left");
 			rightResult = halfBuild(rightLine, rightHL[rightIndex++] ?? rightLine.content, wd.newRanges, "right");
-		} else if (paired && wd && leftLine && rightLine && wd.similarity >= WORD_DIFF_MIN_SIM && !canHL) {
-			const pwd = plainWordDiff(leftLine.content, rightLine.content);
-			leftIndex++;
-			rightIndex++;
-			leftResult = halfBuild(leftLine, pwd.old, null, "left");
-			rightResult = halfBuild(rightLine, pwd.new, null, "right");
 		} else {
 			leftResult = halfBuild(
 				row.left,
@@ -6706,7 +6705,8 @@ async function renderSplit(
 	}
 
 	out.push(`${diffRule(half)}${FG_RULE}┊${D_RST}${diffRule(half)}`);
-	if (rows.length > vis.length) out.push(`${BG_BASE}${FG_DIM}  ${collapsedDiffHint(rows.length - vis.length, 0)}${D_RST}`);
+	if (diff.simplified) out.push(`${FG_DIM}(large change: simplified line diff)${D_RST}`);
+	if (totalRows > vis.length) out.push(`${BG_BASE}${FG_DIM}  ${collapsedDiffHint(totalRows - vis.length, 0)}${D_RST}`);
 	return out.join("\n");
 }
 
@@ -6724,8 +6724,7 @@ function getEditOperations(input: any): Array<{ oldText: string; newText: string
 	return oldText && oldText !== newText ? [{ oldText, newText }] : [];
 }
 
-function summarizeEditOperations(operations: Array<{ oldText: string; newText: string }>) {
-	const diffs = operations.map((edit) => parseDiff(edit.oldText, edit.newText));
+function summarizeEditOperations(operations: Array<{ oldText: string; newText: string }>, diffs = operations.map((edit) => parseDiff(edit.oldText, edit.newText))) {
 	const totalAdded = diffs.reduce((sum, diff) => sum + diff.added, 0);
 	const totalRemoved = diffs.reduce((sum, diff) => sum + diff.removed, 0);
 	const totalLines = diffs.reduce((sum, diff) => sum + diff.lines.length, 0);
@@ -7331,14 +7330,15 @@ class CodemodePreview extends ToolText {
 	render(width: number): string[] {
 		const limit = this.expanded ? expandedPreviewLimit() : codemodePreviewLimit();
 		if (limit === 0) return [];
-		// Count after ToolText wraps with the actual width and branch indentation.
+		// Count every wrapped line, but retain and pad only the visible prefix.
+		this.renderLimit = limit;
 		const lines = super.render(width);
-		if (lines.length <= limit) return lines;
-		let hint = this.theme.fg("muted", `... (${lines.length - limit} more lines${inlineDetailHint(this.expanded, true)})`);
+		if (this.totalLines <= limit) return lines;
+		let hint = this.theme.fg("muted", `... (${this.totalLines - limit} more lines${inlineDetailHint(this.expanded, true)})`);
 		if (this.expanded) {
 			hint += `\n${this.theme.fg("warning", `(display capped at ${limit} lines${deepExpandHint()})`)}`;
 		}
-		return [...lines.slice(0, limit), ...makeText(undefined, withBranch(hint, this.theme)).render(width)];
+		return [...lines, ...makeText(undefined, withBranch(hint, this.theme)).render(width)];
 	}
 }
 
@@ -7379,12 +7379,20 @@ function renderCodemodeCall(args: any, theme: Theme, ctx: any, fabric = false): 
 
 function renderCodemodeResult(result: any, options: any, theme: Theme, ctx: any, fabric = false): Container | Text {
 	if (options.isPartial) {
+		delete ctx.state._codemodeResult;
 		return makeText(ctx.lastComponent, runningPreviewBlock(result, "", !!options.expanded, theme, ctx));
 	}
 	clearBlinkTimer(ctx);
 	const isError = ctx.isError || (fabric && result.details?.success === false);
 	setToolStatus(ctx, isError ? "error" : "success");
 	const raw = getTextContent(result).replace(/\r\n/g, "\n");
+	const limit = options.expanded ? expandedPreviewLimit() : codemodePreviewLimit();
+	const cached = ctx.state._codemodeResult;
+	if (cached && cached.component === ctx.lastComponent && cached.raw === raw
+		&& cached.expanded === !!options.expanded && cached.limit === limit
+		&& cached.extra === extraToolOutputExpanded && cached.isError === isError
+		&& cached.success === result.details?.success && cached.path === result.details?.fullOutputPath
+		&& cached.epoch === _toolBranchVisualEpoch) return cached.component;
 	const header = fabric ? null : /^Script (completed|failed)\nWall time ([\d.]+) seconds\nOutput:\n/.exec(raw);
 	const output = (header ? raw.slice(header[0].length) : raw).trim();
 	const completed = !!header || (fabric && result.details?.success === true);
@@ -7393,13 +7401,16 @@ function renderCodemodeResult(result: any, options: any, theme: Theme, ctx: any,
 	const component = ctx.lastComponent instanceof Container ? ctx.lastComponent : new Container();
 	component.clear();
 	component.addChild(makeText(undefined, withBranch(theme.fg(isError ? "error" : "muted", summary), theme)));
-	if (output) {
+	if (output && limit > 0) {
 		const styled = output.split("\n").map((line) => theme.fg(isError ? "error" : "dim", line || " ")).join("\n");
 		component.addChild(new CodemodePreview(styled, !!options.expanded, theme));
 	}
 	if (typeof result.details?.fullOutputPath === "string") {
 		component.addChild(makeText(undefined, withBranch(theme.fg("muted", `Full output: ${result.details.fullOutputPath}`), theme)));
 	}
+	ctx.state._codemodeResult = { raw, expanded: !!options.expanded, limit, extra: extraToolOutputExpanded,
+		isError, success: result.details?.success, path: result.details?.fullOutputPath,
+		epoch: _toolBranchVisualEpoch, component };
 	return component;
 }
 
@@ -7442,8 +7453,21 @@ function collectLiveToolLines(result: any, expanded: boolean, ctx: any): { lines
 	const cached = ctx?.state?._liveOutputCache;
 	if (cached?.text === text && cached.expanded === expanded && cached.limit === limit) return cached.collected;
 	const raw = text.replace(/\r\n/g, "\n").trimEnd();
-	const collected = collectNonEmptyLines(raw, expanded && limit > 0 ? undefined : limit, expanded ? limit : undefined);
-	if (ctx?.state) ctx.state._liveOutputCache = { text, expanded, limit, collected };
+	let collected: { lines: string[]; total: number };
+	if (cached?.raw && cached.expanded === expanded && cached.limit === limit && raw.startsWith(cached.raw)) {
+		// Revisit the last partial line; completed lines cannot change in an appended stream.
+		const start = cached.raw.lastIndexOf("\n") + 1;
+		const suffix = collectNonEmptyLines(raw.slice(start), expanded && limit > 0 ? undefined : limit, expanded ? limit : undefined);
+		const previous = cached.collected;
+		const kept = expanded && previous.total > limit ? previous.lines : previous.lines.slice(0, -1);
+		const lines = limit === 0 ? [] : expanded
+			? [...kept, ...suffix.lines].slice(0, limit)
+			: [...kept, ...suffix.lines].slice(-limit);
+		collected = { lines, total: previous.total - 1 + suffix.total };
+	} else {
+		collected = collectNonEmptyLines(raw, expanded && limit > 0 ? undefined : limit, expanded ? limit : undefined);
+	}
+	if (ctx?.state) ctx.state._liveOutputCache = { text, raw, expanded, limit, collected };
 	return collected;
 }
 
@@ -9027,7 +9051,10 @@ export default function (pi: ExtensionAPI) {
 		const command = typeof args?.command === "string" ? args.command : "";
 		const label = localIntentFor(command);
 		if (label) return label;
-		if (ctx?.executionStarted === true) watchLocalIntent(command, () => safeInvalidate(ctx));
+		if (ctx?.executionStarted === true) {
+			ctx.state._localIntentRedraw ??= () => safeInvalidate(ctx);
+			watchLocalIntent(command, ctx.state._localIntentRedraw);
+		}
 		return "";
 	};
 	const bashParameters = {
@@ -9474,7 +9501,7 @@ export default function (pi: ExtensionAPI) {
 			EDIT_LOCALIZED.delete(toolCallId);
 			const result = await (editTool.execute as (...args: unknown[]) => ReturnType<typeof editTool.execute>)(toolCallId, params, signal, onUpdate, ctx);
 			if (operations.length === 0) return result;
-			const { diffs, summary, totalLines, totalHunks } = summarizeEditOperations(operations);
+			const { diffs, summary, totalLines, totalHunks } = summarizeEditOperations(operations, localizedDiffs?.map((entry) => entry.diff));
 			const baseDetails = (((result as any).details ?? {}) as Record<string, unknown>);
 			// null: the edits could not be located, and the row showed (and keeps showing) the diff without file line numbers.
 			const preview = localizedDiffs?.map((entry) => entry.saved) ?? null;
@@ -9522,8 +9549,9 @@ export default function (pi: ExtensionAPI) {
 				return makeResponsiveDiffText(ctx, ctx.lastComponent, `${hdr}\n${pending}`);
 			}
 			const diffWidth = contextDiffWidth(ctx);
-			const key = `edit:${fp}:${hashText(operations.map((edit) => `${edit.oldText}\u0000${edit.newText}`).join("\u0001"))}:${diffWidth}:${ctx.expanded ? 1 : 0}:${_toolBranchVisualEpoch}`;
-			const { diffs: fallbackDiffs, summary: editSummary } = getCachedEditOperationSummary(ctx, key, operations);
+			const contentKey = `${fp}:${hashText(operations.map((edit) => `${edit.oldText}\u0000${edit.newText}`).join("\u0001"))}`;
+			const key = `edit:${contentKey}:${diffWidth}:${ctx.expanded ? 1 : 0}:${_toolBranchVisualEpoch}`;
+			const { diffs: fallbackDiffs, summary: editSummary } = getCachedEditOperationSummary(ctx, contentKey, operations);
 			if (ctx.state._pk !== key) {
 				ctx.state._pk = key;
 				ctx.state._ptBody = theme.fg("muted", "(rendering…)");

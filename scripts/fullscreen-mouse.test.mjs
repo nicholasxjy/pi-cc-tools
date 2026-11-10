@@ -61,6 +61,7 @@ chat.addChild(secondTool);
 const group = chat.children.find((child) => Array.isArray(child.tools));
 check("tools grouped", !!group, chat.children.map((child) => child.constructor.name).join(","));
 if (group) {
+	group.setExpanded(true);
 	const groupLines = group.render(80);
 	group.render(80);
 	const plain = groupLines.map((line) => line.replace(/\x1b\[[0-9;]*m/g, ""));
@@ -93,7 +94,13 @@ function fullscreen(component) {
 	const terminal = { columns: 80, rows: 20, write() {} };
 	const tui = new TuiAltScreen(terminal, false, undefined, { mouse: true });
 	tui.setLayoutRoot(component);
-	const frame = () => { tui.currentLayout = renderLayoutFrame(component, 80, 20, () => {}); };
+	const frame = () => {
+		tui.currentLayout = renderLayoutFrame(component, 80, 20, () => {});
+		tui.previousScreen = component.render(80);
+		// Each test gesture is a separate click, not a timed double-click.
+		tui.lastClick = undefined;
+		tui.lastComponentClick = undefined;
+	};
 	const event = (button, y, release = false) => tui.handleMouseEvent({ button, x: 2, y, release });
 	frame();
 	return { tui, frame, event };
@@ -102,35 +109,36 @@ function fullscreen(component) {
 const realGroup = fullscreen(group);
 group.setExpanded(false);
 realGroup.frame();
-const groupRows = group.render(80).map((line) => line.replace(/\x1b\[[0-9;]*m/g, ""));
-const secondRow = groupRows.findIndex((line) => line.includes("spinner"));
-realGroup.event(0, secondRow);
+const groupHeader = group.render(80).findIndex((line) => line.includes("Read 2 files"));
+realGroup.event(0, groupHeader);
 check("fullscreen group leaves press for selection", realGroup.tui.selectionPressActive && !realGroup.tui.mousePressTarget, "group stole selection press");
-realGroup.event(0, secondRow, true);
-check("fullscreen click opens only second tool", !group.tools[0].expanded && group.tools[1].expanded, JSON.stringify(group.tools.map((tool) => tool.expanded)));
-realGroup.frame();
-realGroup.event(0, 1);
-realGroup.event(0, 1, true);
+realGroup.event(0, groupHeader, true);
 check("fullscreen header opens all tools", group.tools.every((tool) => tool.expanded), JSON.stringify(group.tools.map((tool) => tool.expanded)));
 realGroup.frame();
-realGroup.event(0, 1);
-realGroup.event(0, 1, true);
-check("fullscreen header collapses all tools", group.tools.every((tool) => !tool.expanded), JSON.stringify(group.tools.map((tool) => tool.expanded)));
+const secondRow = group.render(80).findIndex((line) => line.includes("spinner"));
+realGroup.event(0, secondRow);
+realGroup.event(0, secondRow, true);
+check("fullscreen member click collapses all tools", group.tools.every((tool) => !tool.expanded), JSON.stringify(group.tools.map((tool) => tool.expanded)));
+realGroup.frame();
+realGroup.event(0, groupHeader);
+realGroup.event(0, groupHeader, true);
+check("fullscreen header reopens all tools", group.tools.every((tool) => tool.expanded), JSON.stringify(group.tools.map((tool) => tool.expanded)));
 realGroup.frame();
 realGroup.event(35, 19);
 const unhovered = group.render(80);
 realGroup.event(35, secondRow);
 const hovered = group.render(80);
-check("hover brightens only target row", hovered[secondRow] !== unhovered[secondRow] && hovered.every((line, i) => i === secondRow || line === unhovered[i]), JSON.stringify({ before: unhovered.slice(1, 4), after: hovered.slice(1, 4) }));
-realGroup.event(35, 2);
-const firstHovered = group.render(80);
-check("hover transfers to sibling row", firstHovered[2] !== unhovered[2] && firstHovered[secondRow] === unhovered[secondRow], "previous row remained bright");
+check("member hover brightens only the group header", hovered[groupHeader] !== unhovered[groupHeader] && hovered.every((line, i) => i === groupHeader || line === unhovered[i]), JSON.stringify({ before: unhovered.slice(1, 4), after: hovered.slice(1, 4) }));
+const firstRow = group.render(80).findIndex((line) => line.includes("extensions/index.ts"));
+realGroup.event(35, firstRow);
+check("sibling hover retains the group highlight", group.render(80).every((line, i) => line === hovered[i]), "hover changed sibling content");
 realGroup.event(35, 19);
 check("hover leaves through blank viewport", group.render(80).every((line, i) => line === unhovered[i]), "hover persisted after moving away");
 realGroup.event(0, secondRow);
-realGroup.event(32, secondRow + 1);
+// A one-cell move is intentional click jitter; move past it to start selection.
+realGroup.event(32, secondRow + 2);
 check("drag remains transcript selection", realGroup.tui.selectionDragged && !realGroup.tui.mousePressTarget, "drag captured by group");
-realGroup.event(0, secondRow + 1, true);
+realGroup.event(0, secondRow + 2, true);
 
 const repeatedChat = new Container();
 const repeated = ["repeat-1", "repeat-2"].map((id) => {
@@ -163,11 +171,17 @@ for (const [name, id, args] of [
 const mixedGroup = mixedChat.children.find((child) => Array.isArray(child.tools));
 const mixedTui = fullscreen(mixedGroup);
 const mixedLines = mixedGroup.render(80).map((line) => line.replace(/\x1b\[[0-9;]*m/g, ""));
-const grepY = mixedLines.findIndex((line) => line.includes("mouse"));
-check("mixed group has separate rows", grepY >= 0, JSON.stringify(mixedLines));
+check("mixed group collapses to a sentence", mixedLines.some((line) => line.includes("Read 1 file, searched 1 pattern")), JSON.stringify(mixedLines));
+const mixedHeader = mixedLines.findIndex((line) => line.includes("Read 1 file"));
+mixedTui.event(0, mixedHeader);
+mixedTui.event(0, mixedHeader, true);
+check("mixed group header opens all members", mixedGroup.tools.every((tool) => tool.expanded), JSON.stringify(mixedGroup.tools.map((tool) => tool.expanded)));
+mixedTui.frame();
+const grepY = mixedGroup.render(80).findIndex((line) => line.includes("mouse"));
+check("expanded mixed group exposes the grep row", grepY >= 0, JSON.stringify(mixedGroup.render(80)));
 mixedTui.event(0, grepY);
 mixedTui.event(0, grepY, true);
-check("mixed group click opens grep alone", !mixedGroup.tools[0].expanded && mixedGroup.tools[1].expanded, JSON.stringify(mixedGroup.tools.map((tool) => tool.expanded)));
+check("mixed member click collapses all members", mixedGroup.tools.every((tool) => !tool.expanded), JSON.stringify(mixedGroup.tools.map((tool) => tool.expanded)));
 
 const soloChat = new Container();
 const soloTool = new ToolExecutionComponent("read", "solo", { path: "extensions/index.ts" }, undefined, read, ui, process.cwd());

@@ -65,3 +65,10 @@ test("anything else stays a bash command", () => {
 		assert.equal(detectBashFileEdit(command), undefined, command);
 	}
 });
+
+
+test("many shell edit targets are deduplicated in their original order", () => {
+	const paths = Array.from({ length: 2000 }, (_, i) => `file-${i}.txt`);
+	const edit = detectBashFileEdit(`sed -i 's/old/new/g' ${[...paths, ...paths].join(" ")}`);
+	assert.deepEqual(edit?.paths, paths);
+});
