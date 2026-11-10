@@ -26,14 +26,14 @@ let STATUS_DIM = "\x1b[38;2;153;153;153m";
 
 // Short TTL so /cc-spinner changes are picked up within ~1s without
 // re-reading the file on every spinner tick (~170ms).
-let _spinnerSettingsCache: { value: { adaptive: boolean; verbColor: string; statusColor: string }; expires: number } | null = null;
+let _spinnerSettingsCache: { value: { adaptive: boolean; verbColor: string; statusColor: string; terminalTitle: boolean }; expires: number } | null = null;
 const SPINNER_SETTINGS_TTL_MS = 1_000;
 // Cross-extension bust signal: /cc-spinner in index.ts bumps this counter
 // and we drop the cache when it changes.
 const SPINNER_BUST_KEY = Symbol.for("pi-claude-style-tools:spinner-settings-bust");
 let _spinnerLastBust = 0;
 
-function readSpinnerSettings(): { adaptive: boolean; verbColor: string; statusColor: string } {
+function readSpinnerSettings(): { adaptive: boolean; verbColor: string; statusColor: string; terminalTitle: boolean } {
 	const now = Date.now();
 	const bust = ((globalThis as any)[SPINNER_BUST_KEY] as number | undefined) ?? 0;
 	if (bust !== _spinnerLastBust) {
@@ -44,6 +44,7 @@ function readSpinnerSettings(): { adaptive: boolean; verbColor: string; statusCo
 		return _spinnerSettingsCache.value;
 	}
 	let adaptive = true;
+	let terminalTitle = true;
 	// With adaptive colors on, the glyph uses pi's accent. Use borderAccent for the verb so it
 	// feels themed and lively without collapsing into the exact same Claude
 	// orange as the glyph on themes like openAntigravity-dark.
@@ -56,12 +57,13 @@ function readSpinnerSettings(): { adaptive: boolean; verbColor: string; statusCo
 			const raw = JSON.parse(readFileSync(p, "utf8"));
 			if (raw && typeof raw === "object") {
 				if (raw.themeAdaptive === false) adaptive = false;
+				if (typeof raw.terminalTitle === "boolean") terminalTitle = raw.terminalTitle;
 				if (typeof raw.spinnerVerbColor === "string" && raw.spinnerVerbColor.length > 0) verbColor = raw.spinnerVerbColor;
 				if (typeof raw.spinnerStatusColor === "string" && raw.spinnerStatusColor.length > 0) statusColor = raw.spinnerStatusColor;
 			}
 		} catch { /* ignore */ }
 	}
-	const value = { adaptive, verbColor, statusColor };
+	const value = { adaptive, verbColor, statusColor, terminalTitle };
 	_spinnerSettingsCache = { value, expires: now + SPINNER_SETTINGS_TTL_MS };
 	return value;
 }
@@ -796,7 +798,7 @@ const TURN_COMPLETION_MS = 2_500;
 
 
 export default function (pi: ExtensionAPI) {
-	installTerminalTitle(pi, describeToolActivity);
+	installTerminalTitle(pi, describeToolActivity, () => readSpinnerSettings().terminalTitle);
 	let agentStartTime = 0;
 	let turnStartTime = 0;
 	let refreshTimer: ReturnType<typeof setTimeout> | null = null;

@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { register } from "node:module";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { setImmediate as tick } from "node:timers/promises";
 
@@ -8,6 +11,29 @@ register("./ts-resolve-loader.mjs", import.meta.url);
 const spinner = (await import("../extensions/spinner.ts")).default;
 
 const entry = (title: unknown) => ({ type: "custom", customType: "pi-claude-code-ui-terminal-title", data: { title } });
+
+function configure(settings: Record<string, unknown>, scope: "project" | "user" = "user") {
+	const path = scope === "project"
+		? join(process.cwd(), ".pi", "settings.json")
+		: join(process.env.PI_CODING_AGENT_DIR!, "settings.json");
+	mkdirSync(dirname(path), { recursive: true });
+	writeFileSync(path, JSON.stringify(settings));
+	const bustKey = Symbol.for("pi-claude-style-tools:spinner-settings-bust");
+	(globalThis as any)[bustKey] = ((globalThis as any)[bustKey] ?? 0) + 1;
+}
+
+test.beforeEach((t) => {
+	const dir = mkdtempSync(join(tmpdir(), "terminal-title-"));
+	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+	process.env.PI_CODING_AGENT_DIR = join(dir, "agent");
+	t.mock.method(process, "cwd", () => dir);
+	configure({});
+	t.after(() => {
+		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+		rmSync(dir, { recursive: true, force: true });
+	});
+});
 
 function harness(t: test.TestContext, mode = "tui", hasUI = true) {
 	const handlers = new Map<string, Array<(event: any, ctx: any) => unknown>>();
@@ -61,6 +87,47 @@ test("the spinner writes tool activities and keeps the last step after completio
 	await tick();
 	assert.equal(h.titles.at(-1), "Waiting for your answer");
 	assert.equal(h.saved.length, 5, "only a changed step creates a session entry");
+});
+
+test("terminalTitle accepts booleans from project and agent settings", async (t) => {
+	for (const scope of ["project", "user"] as const) {
+		for (const value of [false, true, "false"]) {
+			configure({}, "project");
+			configure({}, "user");
+			configure({ terminalTitle: value }, scope);
+			const h = harness(t);
+			await h.start("read", { path: "app.ts" });
+			assert.deepEqual(h.titles, value === false ? [] : ["Reading app.ts"], `${scope}: ${value}`);
+			assert.equal(h.saved.length, value === false ? 0 : 1);
+		}
+	}
+});
+
+test("disabled terminalTitle suppresses tool, resume, tree and lifecycle writes", async (t) => {
+	configure({ terminalTitle: false });
+	const h = harness(t);
+	h.setBranch([entry("Saved step")]);
+	for (const event of ["session_start", "session_tree", "session_info_changed", "agent_settled"]) {
+		await h.fire(event);
+		await tick();
+	}
+	await h.start("fabric_exec", { display: { name: "Milestone" } }, "outer");
+	await h.start("read", { path: "app.ts" }, "child", "outer");
+	assert.deepEqual(h.titles, []);
+	assert.deepEqual(h.saved, []);
+});
+
+test("disabling terminalTitle suppresses already scheduled writes", async (t) => {
+	const h = harness(t);
+	await h.start("read", { path: "app.ts" });
+	await h.fire("session_info_changed");
+	configure({ terminalTitle: false });
+	await tick();
+	await h.start("read", { path: "next.ts" });
+	await h.fire("agent_settled");
+	await tick();
+	assert.deepEqual(h.titles, ["Reading app.ts"]);
+	assert.equal(h.saved.length, 1);
 });
 
 test("declared milestones win and nested calls cannot replace them", async (t) => {
