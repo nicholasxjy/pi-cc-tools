@@ -15,7 +15,7 @@ process.env.PI_CODING_AGENT_DIR = root;
 process.env.PI_CC_UI_CACHE_DIR = root;
 process.env.PI_CC_UI_INTENT_HELPER = join(root, "unused-helper");
 writeFileSync(join(root, "settings.json"), JSON.stringify({ terminalTheme: false, bashIntent: "local" }));
-const { ToolExecutionComponent } = await import("@earendil-works/pi-coding-agent");
+const { AssistantMessageComponent, ToolExecutionComponent } = await import("@earendil-works/pi-coding-agent");
 const { Loader } = await import("@earendil-works/pi-tui");
 const { initTheme, theme } = await import("../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js");
 initTheme("dark", false);
@@ -116,4 +116,34 @@ test("a stopped Loader and reload leave no global strong reference to the UI", a
 	(globalThis as any)[Symbol.for("pi-claude-style-tools:active-ui")] = ui;
 	await import("../extensions/spinner.ts?clear-previous-ui");
 	assert.notEqual((globalThis as any)[Symbol.for("pi-claude-style-tools:active-ui")], ui);
+});
+
+
+test("thinking shares Loader redraws without adding timers, and stopping the Loader stops both animations", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	let now = 1_700_000;
+	t.mock.method(Date, "now", () => now);
+	const timeouts = t.mock.method(globalThis, "setTimeout");
+	const component = new AssistantMessageComponent({ role: "assistant", stopReason: "pending", content: [{ type: "thinking", thinking: "Shared animation clock." }] } as any);
+	const frames: string[] = [];
+	const ui = { requestRender() { frames.push(component.render(80).join("\n")); } };
+	const loader = new Loader(ui as any, (text: string) => text, (text: string) => text, "working");
+	t.after(() => loader.stop());
+	assert.equal(timeouts.mock.callCount(), 1);
+	const initial = frames[0];
+	assert.match(initial, /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/);
+	assert.match(loader.render(80).join("\n"), /· working/);
+	for (let i = 1; i <= 10; i++) {
+		now += 170;
+		t.mock.timers.tick(170);
+		assert.equal(frames.length, i + 1);
+		assert.equal(timeouts.mock.callCount(), i + 1, "only the existing Loader timer is rescheduled");
+		assert.doesNotMatch(loader.render(80).join("\n"), /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/, "the working line retains its own glyph family");
+	}
+	assert.equal(new Set(frames).size, 10);
+	loader.stop();
+	const redraws = frames.length;
+	now += 1000;
+	t.mock.timers.tick(1000);
+	assert.equal(frames.length, redraws, "no independent thinking timer remains after Loader.stop()");
 });

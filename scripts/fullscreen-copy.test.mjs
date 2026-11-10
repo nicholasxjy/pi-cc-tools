@@ -80,6 +80,10 @@ const thinking = new AssistantMessageComponent({
 }, false);
 thinking.updateContent(thinking.lastMessage, false);
 thinking.setHideThinkingBlock(false);
+const liveThinking = new AssistantMessageComponent({
+	role: "assistant", content: [{ type: "thinking", thinking: "Streaming reasoning.\n\nKeep copying clean." }], stopReason: "pending",
+});
+liveThinking.updateContent(liveThinking.lastMessage, true);
 const bash = extensions[0].tools.get("bash");
 const tool = new ToolExecutionComponent("bash", "copy-bash", { command: "ls" }, undefined, bash?.definition ?? bash, { requestRender() {} }, process.cwd());
 tool.updateResult({ content: [{ type: "text", text: "file1\nfile2" }], isError: false }, false);
@@ -88,6 +92,7 @@ const chat = new Container();
 chat.addChild(user);
 chat.addChild(assistant);
 chat.addChild(thinking);
+chat.addChild(liveThinking);
 chat.addChild(tool);
 tui.addChild(chat);
 render(tui);
@@ -191,6 +196,14 @@ check("expanded thinking copies without ∴, label, or box", () => {
 	const last = rowOf("Then answer.", first);
 	const result = drag({ x: 0, y: first }, { x: COLUMNS - 1, y: last });
 	assert.equal(result.copied, "Check the box.\n\nlet x = 2;\n\nThen answer.");
+});
+
+check("live thinking copies without its animated gutter or label", () => {
+	const first = rowOf("Thinking: Streaming reasoning.");
+	const last = rowOf("Keep copying clean.", first);
+	assert.match(screen()[first], /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/);
+	const result = drag({ x: 0, y: first }, { x: COLUMNS - 1, y: last });
+	assert.equal(result.copied, "Streaming reasoning.\n\nKeep copying clean.");
 });
 
 check("past prompt copies without the ❯ pad", () => {

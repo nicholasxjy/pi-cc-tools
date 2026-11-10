@@ -143,3 +143,90 @@ test("live thinking stays visible when the component receives a fresh streaming 
 	assert.match(visible(component), /Thought for 1s/);
 	assert.doesNotMatch(visible(component), /First reasoning fragment/);
 });
+
+
+test("live thinking animates only its gutter and reuses the Markdown cache in every mode", async (t) => {
+	const { Markdown, visibleWidth } = await import("@earendil-works/pi-tui");
+	let now = 1_700_000;
+	t.mock.method(Date, "now", () => now);
+	const markdown = t.mock.method(Markdown.prototype, "render");
+	const timers = t.mock.method(globalThis, "setTimeout");
+	for (const mode of ["live", "latest", "full"]) {
+		await setMode(mode);
+		const message = { role: "assistant", stopReason: "pending", content: [{ type: "thinking", thinking: "Reasoning line.\n\n".repeat(200) }] };
+		const original = structuredClone(message);
+		const component = new AssistantMessageComponent();
+		component.updateContent(message, true);
+		const first = component.render(100);
+		const snapshot = [...first];
+		const renders = markdown.mock.callCount();
+		const scheduled = timers.mock.callCount();
+		const frames = new Set<string>();
+		const start = performance.now();
+		for (let i = 0; i < 1000; i++) {
+			now += 170;
+			const lines = component.render(100);
+			assert.equal(component.render(100), lines, "redraws within one frame reuse the same array");
+			const row = lines.findIndex((line: string) => plain(line).includes("Thinking:"));
+			const glyph = plain(lines[row]).trimStart()[0];
+			frames.add(glyph);
+			assert.match(glyph, /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]$/);
+			assert.ok(lines[row].includes(`\x1b]8686;s\x07 `), "the spinner stays inside the copy-excluded gutter");
+			assert.equal(visibleWidth(lines[row]), 100);
+			assert.deepEqual(lines.slice(row + 1), first.slice(row + 1), "the body stays unchanged between frames");
+		}
+		t.diagnostic(`${mode}: 200-paragraph thinking, ${((performance.now() - start) / 1000).toFixed(3)} ms/frame including assertions`);
+		assert.equal(frames.size, 10);
+		assert.equal(markdown.mock.callCount(), renders, "animation must not re-render Markdown");
+		assert.equal(timers.mock.callCount(), scheduled, "animation must not schedule display timers");
+		assert.deepEqual(first, snapshot, "later frames must not mutate earlier render arrays");
+		assert.deepEqual(message, original, "animation must not enter canonical message content");
+	}
+});
+
+test("manually collapsed live thinking keeps its spinner and respects narrow widths", async (t) => {
+	const { visibleWidth } = await import("@earendil-works/pi-tui");
+	await setMode("live");
+	let now = 1_700_000;
+	t.mock.method(Date, "now", () => now);
+	const component = new AssistantMessageComponent({ role: "assistant", stopReason: "pending", content: [{ type: "thinking", thinking: "Live reasoning." }] });
+	const lines = component.render(100);
+	const y = lines.findIndex((line: string) => plain(line).includes("Thinking:"));
+	assert.ok(component.handleMouse({ type: "click", button: "left", x: 5, y, width: 100, height: lines.length, clickCount: 1 })?.handled);
+	const first = visible(component);
+	assert.match(first, /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Thinking…/);
+	assert.doesNotMatch(first, /Live reasoning/);
+	now += 170;
+	assert.notEqual(visible(component), first);
+	for (const width of [0, 1, 2, 3, 4, 10, 100]) {
+		for (const line of component.render(width)) assert.ok(visibleWidth(line) <= width, `width ${width}: ${JSON.stringify(line)}`);
+	}
+});
+
+test("thinking completion and abort stop the spinner, including before the UI rebuilds", async (t) => {
+	await setMode("live");
+	let now = 1_700_000;
+	t.mock.method(Date, "now", () => now);
+	for (const end of ["thinking_end", "message_end", "aborted"]) {
+		const message: any = { role: "assistant", stopReason: "pending", content: [{ type: "thinking", thinking: "Reasoning to finish." }] };
+		await emit("message_start", { message });
+		await emit("message_update", { message, assistantMessageEvent: { type: "thinking_start" } });
+		const component = new AssistantMessageComponent();
+		component.updateContent(message, true);
+		assert.match(visible(component), /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Thinking:/);
+		now += 1700;
+		if (end === "thinking_end") {
+			await emit("message_update", { message, assistantMessageEvent: { type: end } });
+			assert.doesNotMatch(visible(component), /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/);
+		} else {
+			message.stopReason = end === "aborted" ? "aborted" : "stop";
+			await emit("message_end", { message });
+		}
+		component.updateContent(message, end === "thinking_end");
+		const done = component.render(100);
+		assert.match(done.map(plain).join("\n"), /Thought for/);
+		assert.doesNotMatch(done.map(plain).join("\n"), /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/);
+		now += 170;
+		assert.equal(component.render(100), done, "finished thinking returns the cached static output");
+	}
+});

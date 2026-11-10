@@ -2223,6 +2223,24 @@ const TOOL_EXECUTION_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-tool
 // The returned arrays are only ever spread-copied by Container.render (never mutated in place),
 // so sharing the cached array reference across renders is safe.
 const MESSAGE_RENDER_CACHE = Symbol.for("pi-claude-style-tools:message-render-cache");
+const THINKING_SPINNER_ACTIVE = Symbol.for("pi-claude-style-tools:thinking-spinner-active");
+const THINKING_SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
+
+function renderThinkingSpinner(component: any, lines: string[]): string[] {
+	if (!component[THINKING_SPINNER_ACTIVE] || !isLiveThinkingMessage(component, component.lastMessage)) return lines;
+	const cache = component[MESSAGE_RENDER_CACHE];
+	// Follow the existing Loader's 170ms redraws without another timer or Markdown render.
+	const frame = THINKING_SPINNER_FRAMES[Math.floor(Date.now() / 170) % THINKING_SPINNER_FRAMES.length];
+	if (cache.thinkingFrame === frame) return cache.thinkingLines;
+	const prefix = thinkingGutter();
+	const row = cache.thinkingRow ??= lines.findIndex((line) => line.includes(prefix));
+	if (row < 0) return lines;
+	const animated = lines.slice();
+	animated[row] = lines[row].replace(prefix, prefix.replace("∴", frame));
+	cache.thinkingFrame = frame;
+	cache.thinkingLines = animated;
+	return animated;
+}
 
 function messageRenderCacheHit(thisArg: any, width: number): string[] | null {
 	const cache = thisArg?.[MESSAGE_RENDER_CACHE];
@@ -2386,6 +2404,10 @@ function pluralizeTurns(n: number): string {
 	return `${n} turn${n === 1 ? "" : "s"}`;
 }
 
+function thinkingGutter(): string {
+	return copySkip(` ${WORKED_LINE_FG}∴${RESET} `);
+}
+
 function thinkingSummaryStyledText(body: string, hovered = false): string {
 	// Preserve the visible thinking text column while omitting ∴ when collapsed.
 	const color = hovered ? brightenAnsi(WORKED_LINE_FG) : WORKED_LINE_FG;
@@ -2455,7 +2477,9 @@ class HiddenThinkingSummary {
 			this.cachedLines = [""];
 			return this.cachedLines;
 		}
-		const line = padRenderedLineToWidth(thinkingSummaryStyledText(this.body, this.hovered), safeWidth);
+		const summary = thinkingSummaryStyledText(this.body, this.hovered);
+		const text = this.body === "Thinking…" ? thinkingGutter() + summary.slice(3) : summary;
+		const line = padRenderedLineToWidth(clampLineWidth(text, safeWidth), safeWidth);
 		this.cachedWidth = width;
 		this.cachedHovered = this.hovered;
 		this.cachedLines = [line];
@@ -3118,7 +3142,7 @@ class ThinkingParagraph {
 				symbolPlaced = true;
 				// The "Thinking: " label is presentation added by prefixThinkingLine, not the thought.
 				const unlabeled = line.replace(/^((?:\x1b\[[0-9;]*m)*)Thinking: /, (_match, esc: string) => `${esc}${copySkip("Thinking: ")}`);
-				return `${copySkip(` ${prefix} `)}${unlabeled}`;
+				return `${thinkingGutter()}${unlabeled}`;
 			}
 			return `${gutter}${line}`;
 		}).map((line) => clampLineWidth(line, safeWidth));
@@ -3587,7 +3611,7 @@ function patchAssistantMessages(): void {
 	if (typeof originalRender === "function" && !proto[ASSISTANT_RENDER_PATCH_FLAG]) {
 		proto.render = function patchedAssistantMessageRender(width: number) {
 			const cached = messageRenderCacheHit(this, width);
-			if (cached) return cached;
+			if (cached) return renderThinkingSpinner(this, cached);
 			visitMarkdownDescendants(this, (child) => {
 				const markdownAny = child as any;
 				if (typeof markdownAny.text === "string") {
@@ -3600,12 +3624,8 @@ function patchAssistantMessages(): void {
 			});
 			const lines = originalRender.call(this, width);
 			if (!Array.isArray(lines) || lines.length === 0) return lines;
-			if ((this as any).hasToolCalls) {
-				// Tool-call messages skip copy-zone processing, but still benefit from
-				// caching the rendered output to avoid re-rendering stable children.
-				return storeMessageRenderCache(this, width, lines);
-			}
-			return storeMessageRenderCache(this, width, applyTerminalCopyZones(lines));
+			const rendered = (this as any).hasToolCalls ? lines : applyTerminalCopyZones(lines);
+			return renderThinkingSpinner(this, storeMessageRenderCache(this, width, rendered));
 		};
 		proto[ASSISTANT_RENDER_PATCH_FLAG] = true;
 	}
@@ -3624,16 +3644,19 @@ function patchAssistantMessages(): void {
 			(this as any)[WORKED_START_KEY] = Date.now();
 		}
 		if (!message || !Array.isArray(message.content)) {
+			this[THINKING_SPINNER_ACTIVE] = false;
 			return originalUpdateContent.call(this, message, isStreaming);
 		}
 		// The UI may receive a fresh snapshot without the extension event's content array.
 		if (isStreaming === true) streamingAssistantContents.add(thinkingStateKey(message));
 		else if (isStreaming === false) streamingAssistantContents.delete(thinkingStateKey(message));
 		// Pi defaults hideThinkingBlock to false; the mode must supply its own default.
+		const liveThinking = isLiveThinkingMessage(this, message);
+		this[THINKING_SPINNER_ACTIVE] = liveThinking;
 		const liveMode = getThinkingMode() !== "full";
 		const thinkingCollapsed = thinkingVisibilityOverride ?? liveMode;
 		const override = (this as any).thinkingVisibilityOverrides?.get?.(0);
-		const showLiveThinking = liveMode && thinkingCollapsed && override !== true && isLiveThinkingMessage(this, message);
+		const showLiveThinking = liveMode && thinkingCollapsed && override !== true && liveThinking;
 		const hideThinking = override ?? (thinkingCollapsed && !showLiveThinking);
 		if (hideThinking && messageHasThinkingContent(message)) {
 			// Pi wraps this in theme.italic/fg again — keep plain label for the placeholder pass.
