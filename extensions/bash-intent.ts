@@ -1,8 +1,9 @@
 // Short purpose labels for bash rows ("Bash npm test — Run the test suite").
 //
 // Three modes, chosen with the `bashIntent` setting and applied when the extension loads
-// (pi start or /reload):
-//   off    no labels (default)
+// (pi start or /reload). Since 1.0.112 the default is "model"; set "bashIntent" to "off"
+// (or run /cc-tools intent off) to get the old, unlabeled behavior back.
+//   off    no labels
 //   model  the model writes the label as an extra `displaySummary` argument of each bash call.
 //          This adds a field to the bash tool and a line to the model's instructions.
 //   local  Apple's on-device model writes the label on this Mac (macOS 26+, Apple silicon).
@@ -20,11 +21,15 @@ import { join } from "node:path";
 export type BashIntentMode = "off" | "model" | "local";
 export const BASH_INTENT_MODES: readonly BashIntentMode[] = ["off", "model", "local"];
 
-/** `true` (the original boolean setting) means "model"; anything unknown means off. */
-export function normalizeBashIntentMode(value: unknown): BashIntentMode {
+/**
+ * `true` (the original boolean setting) means "model". Unset and unknown values fall back
+ * to the default ("model" since 1.0.112); only an explicit false or "off" turns labels off.
+ */
+export function normalizeBashIntentMode(value: unknown, defaultMode: BashIntentMode = "model"): BashIntentMode {
 	if (value === true || value === "model") return "model";
 	if (value === "local") return "local";
-	return "off";
+	if (value === false || value === "off") return "off";
+	return defaultMode;
 }
 
 /** Why local labels cannot run here, or undefined when they can. */

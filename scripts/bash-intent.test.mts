@@ -100,15 +100,16 @@ test("bash rows preserve visible words while removing terminal controls and norm
 });
 
 
-test("by default bash keeps its stock schema and guidance", () => {
-	const disabledAgentDir = mkdtempSync(join(tmpdir(), "bash-intent-disabled-"));
-	writeFileSync(join(disabledAgentDir, "settings.json"), "{}");
-	try {
-		const output = execFileSync(process.execPath, [
-			"--experimental-strip-types",
-			"--input-type=module",
-			"-e",
-			`import { register } from "node:module";
+test("by default bash gains displaySummary and guidance; an explicit off keeps the stock schema", () => {
+	const runWith = (settings: object) => {
+		const agentDir = mkdtempSync(join(tmpdir(), "bash-intent-default-"));
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify(settings));
+		try {
+			const output = execFileSync(process.execPath, [
+				"--experimental-strip-types",
+				"--input-type=module",
+				"-e",
+				`import { register } from "node:module";
 import "./scripts/ts-resolve-loader.mjs";
 register("./scripts/ts-resolve-loader.mjs", import.meta.url);
 const tools = new Map();
@@ -116,17 +117,24 @@ const pi = { registerTool: (tool) => tools.set(tool.name, tool), registerCommand
 (await import("./extensions/index.ts")).default(pi);
 const bash = tools.get("bash");
 console.log(JSON.stringify({ hasDisplaySummary: !!bash.parameters.properties.displaySummary, promptGuidelines: bash.promptGuidelines }));`,
-		], {
-			cwd: previousCwd,
-			env: { ...process.env, PI_CODING_AGENT_DIR: disabledAgentDir },
-			encoding: "utf8",
-		});
-		const result = JSON.parse(output.trim().split("\n").at(-1) ?? "{}");
-		assert.equal(result.hasDisplaySummary, false);
-		assert.ok(!result.promptGuidelines?.join("\n").includes("displaySummary"));
-	} finally {
-		rmSync(disabledAgentDir, { recursive: true, force: true });
-	}
+			], {
+				cwd: previousCwd,
+				env: { ...process.env, PI_CODING_AGENT_DIR: agentDir },
+				encoding: "utf8",
+			});
+			return JSON.parse(output.trim().split("\n").at(-1) ?? "{}");
+		} finally {
+			rmSync(agentDir, { recursive: true, force: true });
+		}
+	};
+	// Default (unset): labels on, model mode.
+	const on = runWith({});
+	assert.equal(on.hasDisplaySummary, true);
+	assert.ok(on.promptGuidelines?.join("\n").includes("displaySummary"));
+	// Explicit off: exactly the stock schema and guidance from before 1.0.112.
+	const off = runWith({ bashIntent: "off" });
+	assert.equal(off.hasDisplaySummary, false);
+	assert.ok(!off.promptGuidelines?.join("\n").includes("displaySummary"));
 });
 
 

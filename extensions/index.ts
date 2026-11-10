@@ -8322,7 +8322,7 @@ export default function (pi: ExtensionAPI) {
 						description:
 							m === "group" ? "Toggle grouped adjacent/concurrent tool rows"
 							: m === "thinking" ? "Thinking display: live (default), full, or latest"
-							: m === "intent" ? "Purpose labels on bash rows: off (default), model, or local"
+							: m === "intent" ? "Purpose labels on bash rows: model (default), local, or off"
 							: m === "detail" ? "Toggle Ctrl+Shift+O extra-detail mode"
 							: m === "status" ? "Show tool UI settings"
 							: m === "outlines" ? "Horizontal rules around each tool"

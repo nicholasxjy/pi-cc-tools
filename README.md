@@ -47,8 +47,7 @@ With labels on, a bash row shows what the command is for instead of the command 
 
 `/cc-tools intent` picks where labels come from:
 
-- `off` (default): no labels; rows show the command.
-- `model`: the model writes the label as an extra argument of each bash call. This adds a field to the bash tool and a line to the model's instructions. There is no extra request; the label costs a few output tokens on each call.
+- `model` (default since 1.0.112): the model writes the label as an extra argument of each bash call. This adds a field to the bash tool and a line to the model's instructions. There is no extra request; the label costs a few output tokens on each call. Set `"bashIntent": "off"` (or run `/cc-tools intent off`) to go back to plain commands.
 - `local`: Apple's on-device model writes the label on your Mac, so nothing the model sees changes. It needs macOS 26 or newer on Apple silicon with Apple Intelligence turned on, and the Xcode command line tools for a one-time build of a small helper. The row shows the command until the label arrives, about 0.3 to 0.6 seconds after the command starts. Labels are cached, so a resumed session shows them without asking again.
 
 The choice applies on the next start or after `/reload`, because the model mode changes the bash tool itself. Collapsed groups show only the sentence summary; expand a group to see each command's label.
@@ -117,7 +116,7 @@ Settings are read from `.pi/settings.json` in the project and from the agent set
   "searchOutputMode": "preview",
   "mcpOutputMode": "preview",
   "bashOutputMode": "opencode",
-  "bashIntent": "off",
+  "bashIntent": "model",
   "previewLines": 8,
   "expandedPreviewMaxLines": 4000,
   "extraExpandedPreviewMaxLines": 12000,
@@ -156,7 +155,7 @@ The screenshots on this page use `"toolBackground": "transparent"`.
 
 | Setting | Default | Description |
 | --- | --- | --- |
-| `bashIntent` | `off` | Labels on bash rows in place of the command: `off`, `model` (the model writes them; changes the bash tool and its instructions) or `local` (Apple's on-device model writes them on this Mac). `true` means `model`. Applies on the next start or `/reload` |
+| `bashIntent` | `model` (since 1.0.112) | Labels on bash rows in place of the command. `model` (the model writes them; changes the bash tool and its instructions), `local` (Apple's on-device model writes them on this Mac), or `off` for plain commands as before 1.0.112. `true` means `model`. Applies on the next start or `/reload` |
 | `bashCollapsedLines` | `10` | Output lines shown for a collapsed bash row |
 | `bashCommandPreviewLines` | `0` | Lines of a multi-line command shown under a running or failed bash row. `Ctrl+O` always shows the whole command |
 | `liveToolPreview` | `false` | Show the latest output lines under a running tool |

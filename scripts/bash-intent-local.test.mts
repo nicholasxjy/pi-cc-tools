@@ -89,13 +89,15 @@ function bashRow(command: string, redraws: { count: number }) {
 }
 const header = (row: any) => plain(row.render(100).find((line: string) => plain(line).includes("Bash")) ?? "").trim();
 
-test("settings: true still means model; unknown values mean off", () => {
+test("settings: true still means model; unset and unknown fall back to the model default; only explicit off turns labels off", () => {
 	assert.equal(intent.normalizeBashIntentMode(true), "model");
 	assert.equal(intent.normalizeBashIntentMode("model"), "model");
 	assert.equal(intent.normalizeBashIntentMode("local"), "local");
 	assert.equal(intent.normalizeBashIntentMode(false), "off");
-	assert.equal(intent.normalizeBashIntentMode(undefined), "off");
-	assert.equal(intent.normalizeBashIntentMode("apple"), "off");
+	assert.equal(intent.normalizeBashIntentMode("off"), "off");
+	assert.equal(intent.normalizeBashIntentMode(undefined), "model");
+	assert.equal(intent.normalizeBashIntentMode("apple"), "model");
+	assert.equal(intent.normalizeBashIntentMode(undefined, "off"), "off");
 });
 
 test("labels lose quotes, control codes and a final period, and stay short", () => {

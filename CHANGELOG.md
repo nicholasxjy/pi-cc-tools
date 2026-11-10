@@ -3,6 +3,15 @@
 > [!IMPORTANT]
 > **1.0.69 — package rename (permanent).** Canonical npm name is now [`pi-claude-code-ui`](https://www.npmjs.com/package/pi-claude-code-ui). `pi-claude-style-tools` is legacy and will not receive further releases. Install with `pi install npm:pi-claude-code-ui` or `npm i pi-claude-code-ui`.
 
+## 1.0.112 — 2026-11-10
+
+> [!WARNING]
+> **Behavior change: bash labels are now on by default.** Starting with this version, bash rows show a short purpose label (like `Bash · Run the test suite`) written by the model, instead of the raw command. This is the `bashIntent: "model"` mode: it adds a `displaySummary` field to the bash tool and one line to the model's instructions. If you want the old plain-command rows back, set `"bashIntent": "off"` in `~/.pi/agent/settings.json` or run `/cc-tools intent off` (then `/reload`). Applies on the next start or `/reload`.
+
+### Changed
+
+- **`bashIntent` now defaults to `model`** (was `off`). Explicit values are unchanged: `"off"` and `false` still turn labels off, `"local"` uses the on-device model, and unknown values now fall back to the default instead of off.
+
 ## 1.0.111 — 2026-11-10
 
 > [!WARNING]
