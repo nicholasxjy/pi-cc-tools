@@ -56,7 +56,7 @@ The choice applies on the next start or after `/reload`, because the model mode 
 
 ## Thinking
 
-By default (`live`), thinking is shown while it streams and then collapses to `Thought for 3s`. Click the row to read it again.
+By default (`live`), thinking is shown while it streams and then collapses to `Thought for 3s`. A small dot spinner marks live thinking, distinct from the working line's star spinner. Click the row to read it again.
 
 `/cc-tools thinking latest` goes further: only the latest message keeps its thinking. Earlier messages drop it, so the tool calls that thinking used to separate merge into one row. This changes only what is drawn; the thinking stays in the session and in the model's context. `/cc-tools thinking full` keeps every thinking block expanded, as stock pi does.
 

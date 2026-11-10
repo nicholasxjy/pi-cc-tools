@@ -135,7 +135,7 @@ function getDefaultSpinnerCharacters(): string[] {
 }
 
 const SPINNER_CHARS = getDefaultSpinnerCharacters();
-const OB_FRAMES = [...SPINNER_CHARS, ...[...SPINNER_CHARS].reverse()];
+const OB_FRAMES = [...SPINNER_CHARS, ...SPINNER_CHARS.slice(1, -1).reverse()];
 // Slightly snappier than the old 250ms so ✶/glyphs feel livelier without
 // turning into a full-tree re-render firehose (each tick still requestRenders).
 const LOADER_INTERVAL_MS = 170;
