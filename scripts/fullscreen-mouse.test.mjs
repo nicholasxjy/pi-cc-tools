@@ -284,26 +284,32 @@ try {
 	setCapabilityOverrides({ images: previousImageProtocol });
 }
 
-const codemode = new ToolExecutionComponent("codemode", "codemode-preview", { code: "text('hello');" }, undefined, undefined, ui, process.cwd());
-codemode.updateResult({
-	content: [
-		{ type: "text", text: "Script completed\nWall time 0.1 seconds\nOutput:\n" },
-		{ type: "text", text: Array.from({ length: 12 }, (_, i) => `codemode-output-${i + 1}`).join("\n") },
-	],
-	isError: false,
-}, false);
-const codemodeScreen = fullscreen(codemode);
-const codemodeLines = () => codemode.render(80).map((line) => line.replace(/\x1b\[[0-9;]*m/g, ""));
-assert.equal(codemodeLines().filter((line) => /codemode-output-\d/.test(line)).length, 5);
-for (const expanded of [true, false]) {
-	codemodeScreen.frame();
-	const y = codemodeLines().findIndex((line) => line.includes("codemode-output-1"));
-	codemodeScreen.event(0, y);
-	codemodeScreen.event(0, y, true);
-	assert.equal(codemode.expanded, expanded, "click on codemode output toggles expansion");
-	assert.equal(codemodeLines().filter((line) => /codemode-output-\d/.test(line)).length, expanded ? 12 : 5);
+for (const name of ["codemode", "fabric_exec"]) {
+	const fabric = name === "fabric_exec";
+	const definition = fabric ? { name, renderShell: "self" } : undefined;
+	const component = new ToolExecutionComponent(name, `${name}-preview`, { code: "text('hello');" }, undefined, definition, ui, process.cwd());
+	component.updateResult({
+		content: [
+			...(fabric ? [] : [{ type: "text", text: "Script completed\nWall time 0.1 seconds\nOutput:\n" }]),
+			{ type: "text", text: Array.from({ length: 12 }, (_, i) => `${name}-output-${i + 1}`).join("\n") },
+		],
+		...(fabric ? { details: { success: true, kernel: "typescript", audits: [], phases: [] } } : {}),
+		isError: false,
+	}, false);
+	const screen = fullscreen(component);
+	const lines = () => component.render(80).map((line) => line.replace(/\x1b\[[0-9;]*m/g, ""));
+	const outputCount = () => lines().filter((line) => line.includes(`${name}-output-`)).length;
+	assert.equal(outputCount(), 5);
+	for (const expanded of [true, false]) {
+		screen.frame();
+		const y = lines().findIndex((line) => line.includes(`${name}-output-1`));
+		screen.event(0, y);
+		screen.event(0, y, true);
+		assert.equal(component.expanded, expanded, `click on ${name} output toggles expansion`);
+		assert.equal(outputCount(), expanded ? 12 : 5);
+	}
+	console.log(`ok ${name} five-line preview expands and collapses through fullscreen clicks`);
 }
-console.log("ok codemode five-line preview expands and collapses through fullscreen clicks");
 
 if (failures.length) {
 	console.error(failures.join("\n"));

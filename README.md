@@ -137,9 +137,9 @@ Settings are read from `.pi/settings.json` in the project and from the agent set
 
 The screenshots on this page use `"toolBackground": "transparent"`.
 
-Codemode stays outside tool groups so its preview remains visible. Script and output each get their own `codemodePreviewLines` budget, counted after wrapping to the terminal width; headings, status and truncation hints are extra. Click or press `Ctrl+O` to expand using the existing expanded preview limits. After editing this setting, run `/reload`.
+Codemode and [Pi Fabric](https://github.com/fabric-runtime/pi-fabric) (`fabric_exec`) stay outside tool groups so their previews remain visible. Script and output each get their own `codemodePreviewLines` budget, counted after wrapping to the terminal width; headings, status and truncation hints are extra. Click or press `Ctrl+O` to expand using the existing expanded preview limits. Fabric rows show the declared `display.name` when available and preserve the program's output. After editing this setting, run `/reload`.
 
-Scripts use pi's built-in JavaScript highlighting and syntax colors. Each streamed update appears highlighted immediately, using the same highlighter through completion to avoid a delayed color change. Identical scripts share cached work across rows, redraws and resizing. Scripts over 32,000 characters keep a plain preview to bound tokenization cost.
+Scripts use pi's built-in highlighting and syntax colors: JavaScript for codemode, TypeScript for Fabric, or Python when recorded in the Fabric result. Each streamed update appears highlighted immediately. Identical scripts share cached work across rows, redraws and resizing. Scripts over 32,000 characters keep a plain preview to bound tokenization cost.
 
 ### Layout
 
@@ -150,7 +150,7 @@ Scripts use pi's built-in JavaScript highlighting and syntax colors. Each stream
 | `thinkingMode` | `live` | `live` collapses finished thinking to `Thought for Xs`, `full` keeps it expanded, `latest` hides it in all but the latest message |
 | `terminalTitle` | `true` | Show the latest execution step in the terminal title. `false` disables extension title writes and saving new title entries; run `/reload` after editing |
 | `previewLines` | `8` | Lines in a collapsed preview |
-| `codemodePreviewLines` | `5` | Visible terminal lines in each collapsed codemode script and output preview; `0` hides both previews. Accepts non-negative integers; invalid values use `5` |
+| `codemodePreviewLines` | `5` | Visible terminal lines in each collapsed codemode or Fabric script and output preview; `0` hides both previews. Accepts non-negative integers; invalid values use `5` |
 | `expandedPreviewMaxLines` | `4000` | Line limit when a row is expanded |
 | `extraExpandedPreviewMaxLines` | `12000` | Line limit in `Ctrl+Shift+O` mode |
 | `extraToolOutputExpanded` | `false` | Start in `Ctrl+Shift+O` mode |

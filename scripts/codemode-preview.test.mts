@@ -27,9 +27,22 @@ const hljs = createRequire(import.meta.resolve("@earendil-works/pi-coding-agent"
 const { Container, visibleWidth } = await import("@earendil-works/pi-tui");
 const { initTheme, setTheme } = await import("../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js");
 initTheme("dark", false);
+const fabricDefinition = {
+	name: "fabric_exec", label: "Fabric", description: "Execute TypeScript using Pi core tools and MCP servers.",
+	renderShell: "self", modelOnly: true,
+	prepareArguments: (args: any) => args,
+	execute: async () => ({ content: [], details: { success: true } }),
+	renderCall() { throw new Error("Fabric call must use the codemode renderer"); },
+	renderResult() { throw new Error("Fabric result must use the codemode renderer"); },
+};
+const mcpDefinition = { name: "mcp_status", description: "MCP server status", execute: async () => ({ content: [] }) };
+const tools = new Map<string, any>([[fabricDefinition.name, fabricDefinition], [mcpDefinition.name, mcpDefinition]]);
+const beforeAgentStart: Array<() => unknown> = [];
 (await import("../extensions/index.ts")).default({
-	registerTool() {}, registerCommand() {}, registerShortcut() {}, on() {},
-	getThinkingLevel: () => "off", getAllTools: () => [],
+	registerTool: (tool: any) => tools.set(tool.name, tool),
+	registerCommand() {}, registerShortcut() {},
+	on(event: string, handler: () => unknown) { if (event === "before_agent_start") beforeAgentStart.push(handler); },
+	getThinkingLevel: () => "off", getAllTools: () => [...tools.values()],
 } as any);
 
 test.after(() => {
@@ -53,8 +66,8 @@ function result(text = output, isError = false, details?: unknown) {
 		isError, details,
 	};
 }
-function row(code = script, finished = result(), complete = true) {
-	const component = new ToolExecutionComponent("codemode", `codemode-${Math.random()}`, { code }, { showImages: false }, undefined, { requestRender() {} } as any, agentDir) as any;
+function row(code = script, finished: any = result(), complete = true, name = "codemode", extraArgs = {}) {
+	const component = new ToolExecutionComponent(name, `${name}-${Math.random()}`, { code, ...extraArgs }, { showImages: false }, tools.get(name), { requestRender() {} } as any, agentDir) as any;
 	if (complete) component.setArgsComplete();
 	component.updateResult(finished, false);
 	return component;
@@ -291,4 +304,139 @@ test("a tokenizer failure falls back to text and a later call retries", (t) => {
 	tokenizer.mock.restore();
 	const retried = row(code);
 	assert.match(retried.render(100).find((line: string) => plain(line).includes("const retryCodemode")), /\x1b\[38;2;\d+;\d+;\d+mconst/);
+});
+
+// Mirrors fabric_exec's content/details envelopes from src/fabric-exec-tool.ts and src/audit/details.ts.
+function fabricResult(text = output, success = true) {
+	return {
+		content: [{ type: "text", text }],
+		details: {
+			success, kernel: "typescript", phases: [],
+			audits: [{ ref: "pi.read", provider: "pi", tool: "read", args: { path: "package.json" }, result: "{}", success: true }],
+		},
+		...(success ? {} : { isError: true }),
+	};
+}
+
+function fabricRow(args: any = { code: script }, finished: any = fabricResult(), complete = true) {
+	return row("", finished, complete, "fabric_exec", args);
+}
+
+test("Fabric uses codemode previews and the default shell even with its own renderers", () => {
+	settings();
+	const component = fabricRow({ code: script, display: { name: "Inspect package" } });
+	const lines = visible(component);
+	assert.match(lines[0], /● Fabric Inspect package$/);
+	assert.equal(component.getRenderShell(), "default");
+	assert.equal(codeLines(lines).length, 5);
+	assert.equal(outputLines(lines).length, 5);
+	assert.equal(lines.filter((line) => /7 more lines.*ctrl\+o/.test(line)).length, 2);
+	assert.ok(lines.some((line) => /Completed$/.test(line)));
+	assert.equal(lines[0].indexOf("Fabric"), visible(row())[0].indexOf("Codemode"));
+});
+
+test("Fabric shares preview settings, wrapping and expansion limits with codemode", () => {
+	settings(2, { previewLines: 9, expandedPreviewMaxLines: 8 });
+	const component = fabricRow();
+	assert.equal(codeLines(visible(component)).length, 2);
+	assert.equal(outputLines(visible(component)).length, 2);
+	component.setExpanded(true);
+	assert.equal(codeLines(visible(component)).length, 8);
+	assert.equal(outputLines(visible(component)).length, 8);
+	assert.equal(visible(component).filter((line) => /display capped at 8 lines/.test(line)).length, 2);
+	component.setExpanded(false);
+	assert.equal(outputLines(visible(component)).length, 2);
+
+	settings(0, { expandedPreviewMaxLines: 8 });
+	component.invalidate();
+	assert.equal(codeLines(visible(component)).length + outputLines(visible(component)).length, 0);
+	assert.ok(visible(component).some((line) => /Completed.*ctrl\+o/.test(line)));
+	component.setExpanded(true);
+	assert.equal(outputLines(visible(component)).length, 8);
+
+	settings();
+	const long = "中abcdef".repeat(100);
+	const wrapped = fabricRow({ code: long }, fabricResult(long));
+	for (const width of [40, 80]) {
+		assert.equal(visible(wrapped, width).filter((line) => /中abcdef/.test(line)).length, 10);
+		assert.ok(wrapped.render(width).every((line: string) => visibleWidth(line) <= width));
+	}
+});
+
+test("Fabric stays outside groups while other tools keep grouping", () => {
+	settings();
+	const chat = new Container();
+	const ordinary = (name: string) => new ToolExecutionComponent(name, name, {}, undefined, undefined, { requestRender() {} } as any, agentDir);
+	chat.addChild(ordinary("read"));
+	chat.addChild(ordinary("find"));
+	const first = fabricRow();
+	const second = fabricRow();
+	chat.addChild(first);
+	chat.addChild(second);
+	chat.addChild(ordinary("mcp_status"));
+	chat.addChild(ordinary("web_search"));
+	assert.equal(chat.children.length, 4);
+	assert.equal(chat.children[1], first);
+	assert.equal(chat.children[2], second);
+	assert.equal(outputLines(chat.render(100).map(plain)).length, 10);
+});
+
+test("Fabric partial, failed and detached results retain their text and status", () => {
+	settings();
+	const component = fabricRow();
+	component.updateResult({ content: [{ type: "text", text: "Reading package.json" }], details: { audits: [], phases: [], progress: "Reading package.json" } }, true);
+	assert.equal(codeLines(visible(component)).length, 5);
+	assert.ok(!visible(component).some((line) => /Completed|Done/.test(line)));
+	component.updateResult(fabricResult(), false);
+	assert.equal(outputLines(visible(component)).length, 5);
+	const failed = visible(fabricRow({ code: "throw new Error();" }, fabricResult("Runtime error: broken", false)));
+	assert.ok(failed.some((line) => /Failed$/.test(line)));
+	assert.ok(failed.some((line) => /Runtime error: broken/.test(line)));
+	const empty = visible(fabricRow({ code: "return;" }, fabricResult("(no output)")));
+	assert.ok(empty.some((line) => /Completed$/.test(line)));
+	const detached = visible(fabricRow({ code: "await pi.bash({command: 'build'});" }, { content: [{ type: "text", text: "Fabric program running in background. Task ID: task-1" }] }));
+	assert.ok(detached.some((line) => /Done$/.test(line)));
+	assert.ok(detached.some((line) => /Task ID: task-1/.test(line)));
+});
+
+test("Fabric preserves raw output, audits and image blocks across expansion and history replay", () => {
+	settings(20);
+	const raw = "Script completed\nWall time 0.1 seconds\nOutput:\nkeep this";
+	const original: any = fabricResult(raw);
+	original.content.push({ type: "image", mimeType: "image/png", data: "aW1hZ2U=" });
+	const before = structuredClone(original);
+	const args = { code: script.split("\n"), display: "Inspect package" };
+	const component = fabricRow(args, original);
+	assert.ok(visible(component).some((line) => /Script completed/.test(line)), "Fabric output has no native codemode envelope to strip");
+	component.setExpanded(true);
+	visible(component);
+	component.setExpanded(false);
+	const resumed = fabricRow(JSON.parse(JSON.stringify(args)), JSON.parse(JSON.stringify(original)), false);
+	assert.deepEqual(visible(resumed), visible(component));
+	assert.deepEqual(original, before);
+	assert.equal(codeLines(visible(resumed)).length, 12);
+});
+
+test("Fabric highlights TypeScript while streaming and respects the recorded Python kernel", (t) => {
+	settings();
+	const tokenizer = t.mock.method(hljs, "highlight");
+	const code = 'const fabricManifest: string = "package.json";';
+	const streamed = fabricRow({ code }, fabricResult(), false);
+	assert.equal(plain(streamed.rendererState._codemodeHighlight.text), code);
+	assert.ok(tokenizer.mock.calls.some((call) => call.arguments[0] === code && call.arguments[1].language === "typescript"));
+	const python = 'def fabric_preview():\n    return "ok"';
+	const finished = fabricResult("ok");
+	finished.details.kernel = "python";
+	const component = fabricRow({ code: python }, finished);
+	assert.equal(plain(component.rendererState._codemodeHighlight.text), python);
+	assert.ok(tokenizer.mock.calls.some((call) => call.arguments[0] === python && call.arguments[1].language === "python"));
+});
+
+test("Fabric's MCP description does not replace its definition; other MCP tools still wrap", async () => {
+	for (const handler of beforeAgentStart) await handler();
+	assert.equal(tools.get("fabric_exec"), fabricDefinition);
+	assert.notEqual(tools.get("mcp_status"), mcpDefinition);
+	assert.equal(tools.get("fabric_exec").prepareArguments, fabricDefinition.prepareArguments);
+	assert.equal(tools.get("fabric_exec").execute, fabricDefinition.execute);
+	assert.equal(tools.get("fabric_exec").modelOnly, true);
 });
