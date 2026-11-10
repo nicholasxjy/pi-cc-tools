@@ -104,7 +104,7 @@ Commands that change a setting save it to the settings file, and the change appl
 
 ## Settings
 
-Settings are read from `.pi/settings.json` in the project and from the agent settings file, `$PI_CODING_AGENT_DIR/settings.json` (by default `~/.pi/settings.json`). The values below are the defaults.
+Settings are read from `.pi/settings.json` in the project and from the agent settings file, `$PI_CODING_AGENT_DIR/settings.json` (by default `~/.pi/agent/settings.json`). The values below are the defaults.
 
 ```json
 {

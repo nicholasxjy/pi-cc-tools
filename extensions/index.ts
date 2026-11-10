@@ -256,8 +256,6 @@ function bustSpinnerSettingsCache(): void {
 
 function writeSettingsKey(key: string, value: unknown): void {
 	_settingsCache = null; // invalidate cache on write
-	const home = process.env.HOME ?? "";
-	if (!home && !process.env.PI_CODING_AGENT_DIR) return;
 	const path = getUserSettingsPath();
 	const dir = dirname(path);
 	let settings: Record<string, unknown> = {};
@@ -2001,7 +1999,7 @@ export function dispatchMouseWithClickFixes(tui: any, input: RawMouseEvent, orig
 	const leftButton = (raw.button & 64) === 0 && (raw.button & 3) === 0;
 	const leftPress = leftButton && (raw.button & 32) === 0 && !raw.release;
 	const leftRelease = leftButton && raw.release === true;
-	if (leftPress) holdViewForPress(tui);
+	if (leftPress) holdViewForPress(tui, raw.x, raw.y);
 	else if (leftButton && (raw.button & 32) !== 0) armHeldViewTimer(tui); // still dragging
 	if (leftRelease) clickOpenedRow = false;
 	const result = original(raw);
@@ -2009,11 +2007,15 @@ export function dispatchMouseWithClickFixes(tui: any, input: RawMouseEvent, orig
 	return result;
 }
 
-function holdViewForPress(tui: any): void {
+function holdViewForPress(tui: any, x: number, y: number): void {
 	releaseHeldView(false);
 	try {
 		const view = tui?.getPrimaryScrollView?.();
 		if (!view || view.isFollowingEnd !== true || typeof view.scrollTo !== "function") return;
+		// Only presses in the transcript need the hold. A click in the editor (to move the
+		// cursor) must not stop the transcript from following its end, which also showed
+		// pi's "Jump to latest message" indicator while the button was down.
+		if (!pressInsideScrollView(tui, view, x, y)) return;
 		view.scrollTo(view.scrollTop, { disableFollow: true });
 		heldView = { view, top: view.scrollTop };
 		// A release can go missing (the pointer left the window); never stay held.
@@ -2035,11 +2037,34 @@ function releaseHeldView(follow: boolean, tui?: any): void {
 	if (held.timer) clearTimeout(held.timer);
 	if (!follow || clickOpenedRow) return;
 	try {
-		if (held.view.scrollTop === held.top && held.view.isFollowingEnd !== true && typeof held.view.scrollToEnd === "function") {
-			held.view.scrollToEnd();
+		const view = held.view;
+		if (view.isFollowingEnd === true || typeof view.scrollToEnd !== "function") return;
+		// Still where the press left it, or still at the end (a layout change while held, e.g. a
+		// status row disappearing, clamps scrollTop without any intentional scrolling).
+		const maxTop = Math.max(0, (Number(view.contentHeight) || 0) - (Number(view.viewportHeight) || 0));
+		if (view.scrollTop === held.top || view.scrollTop === maxTop) {
+			view.scrollToEnd();
 			tui?.requestRender?.();
 		}
 	} catch { /* view gone */ }
+}
+
+/** Whether a screen cell lies inside the scroll view's box of the current fullscreen layout. */
+export function pressInsideScrollView(tui: any, view: any, x: number, y: number): boolean {
+	const root = tui?.currentLayout?.root;
+	if (!root) return true; // no layout to check against: keep the old behaviour
+	const find = (box: any): any => {
+		if (box?.scrollView === view) return box;
+		for (const child of box?.children ?? []) {
+			const match = find(child);
+			if (match) return match;
+		}
+		return undefined;
+	};
+	const box = find(root);
+	if (!box?.rect) return true;
+	const r = box.rect;
+	return x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height;
 }
 
 /** The mouse event pi should see, or undefined to drop it (a tiny move while pressed). */
@@ -5159,9 +5184,8 @@ function themeChosenOnCommandLine(): boolean {
 
 /** Pi's saved `theme` setting (may be a "light/dark" pair), from pi's own settings file. */
 function readPiThemeSetting(): string | undefined {
-	const agentDir = process.env.PI_CODING_AGENT_DIR || `${process.env.HOME ?? ""}/.pi/agent`;
 	try {
-		const raw = JSON.parse(readFileSync(`${agentDir}/settings.json`, "utf8"));
+		const raw = JSON.parse(readFileSync(getUserSettingsPath(), "utf8"));
 		return typeof raw?.theme === "string" && raw.theme ? raw.theme : undefined;
 	} catch {
 		return undefined;

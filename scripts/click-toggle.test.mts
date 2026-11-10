@@ -218,3 +218,34 @@ test("after a click that opens a row, or a scroll during the press, the view sta
 	dispatchMouseWithClickFixes(still.tui, { button: 0, x: 5, y: 3, release: true }, () => undefined);
 	assert.deepEqual(still.calls, []);
 });
+
+test("a press in the editor does not hold the transcript; a press in the transcript does", () => {
+	const { dispatchMouseWithClickFixes, pressInsideScrollView } = extension;
+	let followSuppressed = false;
+	const view = {
+		scrollTop: 10, contentHeight: 30, viewportHeight: 20,
+		get isFollowingEnd() { return !followSuppressed; },
+		scrollTo(_top: number, o: any) { if (o?.disableFollow) followSuppressed = true; },
+		scrollToEnd() { followSuppressed = false; },
+	};
+	const tui = {
+		getPrimaryScrollView: () => view,
+		requestRender() {},
+		currentLayout: { root: { rect: { x: 0, y: 0, width: 80, height: 24 }, children: [
+			{ scrollView: view, rect: { x: 0, y: 0, width: 80, height: 20 }, children: [] },
+			{ rect: { x: 0, y: 20, width: 80, height: 4 }, children: [] },
+		] } },
+	};
+	assert.equal(pressInsideScrollView(tui, view, 5, 5), true);
+	assert.equal(pressInsideScrollView(tui, view, 5, 22), false);
+	const noop = () => undefined;
+	dispatchMouseWithClickFixes(tui, { button: 0, x: 5, y: 22 }, noop);
+	assert.equal(followSuppressed, false, "editor press keeps following the end (no jump-to-latest indicator)");
+	dispatchMouseWithClickFixes(tui, { button: 0, x: 5, y: 22, release: true }, noop);
+	dispatchMouseWithClickFixes(tui, { button: 0, x: 5, y: 5 }, noop);
+	assert.equal(followSuppressed, true, "transcript press holds the view");
+	// A layout change while held clamps scrollTop to the new end; release must still restore follow.
+	view.scrollTop = 8; view.contentHeight = 28;
+	dispatchMouseWithClickFixes(tui, { button: 0, x: 5, y: 5, release: true }, noop);
+	assert.equal(followSuppressed, false, "release restores follow when the view is still at its end");
+});

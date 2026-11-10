@@ -14,3 +14,14 @@ test("uses Pi's configured agent directory", () => {
 		else process.env.PI_CODING_AGENT_DIR = previous;
 	}
 });
+
+test("defaults to Pi's agent directory (~/.pi/agent), not ~/.pi", () => {
+	const previous = process.env.PI_CODING_AGENT_DIR;
+	delete process.env.PI_CODING_AGENT_DIR;
+	try {
+		const path = getUserSettingsPath();
+		assert.ok(path.endsWith("/.pi/agent/settings.json"), path);
+	} finally {
+		if (previous !== undefined) process.env.PI_CODING_AGENT_DIR = previous;
+	}
+});
