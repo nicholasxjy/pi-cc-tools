@@ -146,7 +146,7 @@ const TRAILING_MARK = "  · ";
 const KITTY_IMAGE_PREFIX = "\x1b_G";
 const ITERM2_IMAGE_PREFIX = "\x1b]1337;File=";
 
-let toolBackgroundMode: "default" | "transparent" | "outlines" = "outlines";
+let toolBackgroundMode: "default" | "transparent" | "outlines" = "transparent";
 
 interface SettingsFile {
 	toolBackground?: "default" | "transparent" | "outlines" | "border";
@@ -283,7 +283,7 @@ function syncToolBackgroundMode(): void {
 	const settings = readSettings();
 	// Backward compat: "border" was renamed to "outlines"
 	const raw = settings.toolBackground === "border" ? "outlines" : settings.toolBackground;
-	toolBackgroundMode = raw ?? "outlines";
+	toolBackgroundMode = raw ?? "transparent";
 }
 
 function setThemeBg(theme: unknown, key: string, value: string): void {
@@ -8325,8 +8325,8 @@ export default function (pi: ExtensionAPI) {
 							: m === "intent" ? "Purpose labels on bash rows: off (default), model, or local"
 							: m === "detail" ? "Toggle Ctrl+Shift+O extra-detail mode"
 							: m === "status" ? "Show tool UI settings"
-							: m === "outlines" ? "Horizontal rules around each tool (default)"
-							: m === "transparent" ? "No borders or backgrounds"
+							: m === "outlines" ? "Horizontal rules around each tool"
+							: m === "transparent" ? "No borders or backgrounds (default)"
 							: "Pi built-in tool backgrounds",
 					}));
 			}

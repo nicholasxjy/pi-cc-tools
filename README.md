@@ -90,7 +90,7 @@ With [pi-subagents](https://github.com/tintinweb/pi-subagents), `Agent` calls ge
 | Command | What it does |
 | --- | --- |
 | `/cc-tools` | Show the current tool settings |
-| `/cc-tools outlines`, `transparent`, `default` | Tool row style: rules around each tool (default), no rules, or pi's own backgrounds |
+| `/cc-tools outlines`, `transparent`, `default` | Tool row style: rules around each tool, no rules (default), or pi's own backgrounds |
 | `/cc-tools group on`, `off`, `toggle` | Fold consecutive tool calls into one row |
 | `/cc-tools thinking live`, `full`, `latest` | How finished thinking is shown |
 | `/cc-tools intent off`, `model`, `local`, `status` | Where bash labels come from; applies after `/reload` |
@@ -108,7 +108,7 @@ Settings are read from `.pi/settings.json` in the project and from the agent set
 
 ```json
 {
-  "toolBackground": "outlines",
+  "toolBackground": "transparent",
   "groupToolCalls": true,
   "thinkingMode": "live",
   "terminalTheme": true,
@@ -137,7 +137,7 @@ The screenshots on this page use `"toolBackground": "transparent"`.
 
 | Setting | Default | Description |
 | --- | --- | --- |
-| `toolBackground` | `outlines` | `outlines` draws a rule above and below each tool (`border` also works), `transparent` draws none, `default` keeps pi's tool backgrounds |
+| `toolBackground` | `transparent` | `transparent` draws no rules, `outlines` draws a rule above and below each tool (`border` also works), `default` keeps pi's tool backgrounds |
 | `groupToolCalls` | `true` | Fold consecutive tool calls into one row |
 | `thinkingMode` | `live` | `live` collapses finished thinking to `Thought for Xs`, `full` keeps it expanded, `latest` hides it in all but the latest message |
 | `previewLines` | `8` | Lines in a collapsed preview |
