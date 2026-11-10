@@ -142,7 +142,8 @@ const LOADER_INTERVAL_MS = 170;
 const LOADER_LAST_TEXT = Symbol.for("pi-claude-style-tools:loader-last-text");
 const LOADER_ACTIVE = Symbol.for("pi-claude-style-tools:loader-active");
 const LOADER_GENERATION = Symbol.for("pi-claude-style-tools:loader-generation");
-const ACTIVE_UI_SYMBOL = Symbol.for("pi-claude-style-tools:active-ui");
+// Release the UI retained by older module loads.
+delete (globalThis as any)[Symbol.for("pi-claude-style-tools:active-ui")];
 
 function getLoaderIntervalMs(_loader: any): number {
 	return LOADER_INTERVAL_MS;
@@ -170,7 +171,6 @@ function stopLoaderIfUiStopped(loader: any): boolean {
 	(this as any)[LOADER_LAST_TEXT] = nextText;
 	this.setText(nextText);
 	if (this.ui && !(this.ui as any).stopped) {
-		(globalThis as any)[ACTIVE_UI_SYMBOL] = this.ui;
 		this.ui.requestRender();
 	}
 };
@@ -820,12 +820,16 @@ export default function (pi: ExtensionAPI) {
 	let activeTurnId = 0;
 	let turnActive = false;
 	let lastWorkingMessage: string | null = null;
-	let activeCtx: { ui: any; hasUI: boolean } | null = null;
+	let activeCtx: { ui: any; hasUI: boolean; mode?: string } | null = null;
 	// Tools running right now, in start order; the latest one names the working line.
 	const runningTools = new Map<string, { name: string; args: unknown }>();
 	// Root interactive session only — nested/non-UI contexts must not fight
 	// herdr state authority for this pane.
 	let herdrRootSession = false;
+
+	function hasWorkingUi(): boolean {
+		return activeCtx?.hasUI === true && (activeCtx.mode === undefined || activeCtx.mode === "tui");
+	}
 
 	function getEffortSuffix(): string {
 		try {
@@ -906,7 +910,7 @@ export default function (pi: ExtensionAPI) {
 
 	/** Count the shown tokens toward the real total, one frame at a time, while they differ. */
 	function animateTokens(): void {
-		if (tokenFrameTimer || !turnActive || shownTokens === outputTokenCount()) return;
+		if (!hasWorkingUi() || tokenFrameTimer || !turnActive || shownTokens === outputTokenCount()) return;
 		const scheduledAt = Date.now();
 		tokenFrameTimer = setTimeout(() => {
 			tokenFrameTimer = null;
@@ -919,7 +923,7 @@ export default function (pi: ExtensionAPI) {
 
 	function syncWorkingMessage(force = false): void {
 		try {
-			if (!activeCtx?.hasUI) return;
+			if (!activeCtx || !hasWorkingUi()) return;
 		} catch {
 			// Session replacement/reload invalidated the captured context.
 			return;
@@ -939,7 +943,7 @@ export default function (pi: ExtensionAPI) {
 	function restoreDefaultWorkingMessage(): void {
 		lastWorkingMessage = null;
 		try {
-			if (!activeCtx?.hasUI) return;
+			if (!activeCtx || !hasWorkingUi()) return;
 		} catch {
 			// Session replacement/reload invalidated the captured context.
 			return;
@@ -963,7 +967,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function scheduleRefreshTick(): void {
-		if (!turnActive || refreshTimer) return;
+		if (!hasWorkingUi() || !turnActive || refreshTimer) return;
 		const intervalMs = getWorkingMessageIntervalMs();
 		refreshTimer = setTimeout(() => {
 			refreshTimer = null;
@@ -1011,7 +1015,7 @@ export default function (pi: ExtensionAPI) {
 
 	function scheduleThoughtStatusClear(): void {
 		clearThoughtStatusTimer();
-		if (typeof thinkingStatus !== "number") return;
+		if (!hasWorkingUi() || typeof thinkingStatus !== "number") return;
 		const remaining = THOUGHT_DISPLAY_MS - (Date.now() - thoughtForSetAt);
 		if (remaining <= 0) {
 			thinkingStatus = null;
@@ -1154,8 +1158,10 @@ export default function (pi: ExtensionAPI) {
 			rescheduleRefreshLoop();
 			animateTokens();
 			// Same-frame ordering: ensure footer updates even if pi rendered first.
-			const timer = setTimeout(() => syncWorkingMessage(true), 0);
-			unrefTimer(timer);
+			if (hasWorkingUi()) {
+				const timer = setTimeout(() => syncWorkingMessage(true), 0);
+				unrefTimer(timer);
+			}
 			return;
 		}
 
@@ -1203,7 +1209,7 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		try {
-			if (activeCtx?.hasUI) {
+			if (hasWorkingUi()) {
 				const message = `${STATUS_DIM}✻ Turn took ${formatDuration(elapsed)}${RESET}`;
 				lastWorkingMessage = message;
 				try {

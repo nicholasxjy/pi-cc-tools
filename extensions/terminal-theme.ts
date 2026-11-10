@@ -20,7 +20,10 @@ export const SYSTEM_THEME_NAME = "system";
 
 export interface TerminalIo {
 	/** Raw terminal input. Defaults to process.stdin. */
-	input: { on(event: "data", listener: (chunk: unknown) => void): unknown };
+	input: {
+		on(event: "data", listener: (chunk: unknown) => void): unknown;
+		removeListener?(event: "data", listener: (chunk: unknown) => void): unknown;
+	};
 	/** Writes escape sequences to the terminal. Defaults to process.stdout when it is a TTY. */
 	write(data: string): void;
 }
@@ -78,7 +81,9 @@ export function startFocusResync(ui: any, isEnabled: () => boolean, io: Terminal
 	const s = state();
 	s.isEnabled = isEnabled;
 	if (s.io && s.io !== io) {
-		// A different terminal (tests): start over instead of mixing listeners.
+		// Module reloads create a new IO wrapper around the same process streams.
+		if (s.stdinListener) s.io.input.removeListener?.("data", s.stdinListener);
+		if (s.exitHook) process.removeListener("exit", s.exitHook);
 		s.stdinListener = undefined;
 		s.exitHook = undefined;
 	}

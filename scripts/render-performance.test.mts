@@ -30,9 +30,14 @@ const { Container } = await import("@earendil-works/pi-tui");
 const { initTheme } = await import("../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js");
 initTheme("dark", false);
 const tools = new Map<string, any>();
+const handlers = new Map<string, any[]>();
+async function fire(event: string) {
+	for (const handler of handlers.get(event) ?? []) await handler({}, { hasUI: false, ui: {} });
+}
 (await import("../extensions/index.ts")).default({
 	registerTool: (tool: any) => tools.set(tool.name, tool),
-	registerCommand() {}, registerShortcut() {}, on() {},
+	registerCommand() {}, registerShortcut() {},
+	on(event: string, handler: any) { handlers.set(event, [...(handlers.get(event) ?? []), handler]); },
 	getThinkingLevel: () => "off", getAllTools: () => [...tools.values()],
 } as any);
 
@@ -149,6 +154,78 @@ for (const name of ["read", "bash"]) {
 		assert.equal(row.rendererState._liveOutputCache.collected.lines.length, 0);
 	});
 }
+
+
+
+
+test("appending output scans the changed suffix instead of all previous lines", (t) => {
+	settings({ liveToolPreview: true, liveToolPreviewLines: 2 });
+	const row = tool("append");
+	const text = Array.from({ length: 20_000 }, (_, i) => `old-${i}`).join("\n");
+	row.updateResult({ content: [{ type: "text", text }] }, true);
+	const original = String.prototype.indexOf;
+	let scans = 0;
+	const spy = t.mock.method(String.prototype, "indexOf", function (this: string, search: string, from?: number) {
+		if (search === "\n" && this.length >= text.length) scans++;
+		return original.call(this, search, from);
+	});
+	row.updateResult({ content: [{ type: "text", text: `${text}\nnew-1\nnew-2` }] }, true);
+	spy.mock.restore();
+	t.diagnostic(`20,000 existing lines + 2 appended: ${scans} full-buffer line scans`);
+	assert.ok(scans < 10, "append-only streams must reuse the previous line count");
+	assert.equal(row.rendererState._liveLineCount, 20_002);
+	assert.deepEqual(row.rendererState._liveOutputCache.collected.lines, ["new-1", "new-2"]);
+});
+
+for (const expanded of [false, true]) {
+	test(`incremental output matches a fresh result after partial lines and replacements (expanded=${expanded})`, () => {
+		settings({ liveToolPreview: true, liveToolPreviewLines: 3, expandedPreviewMaxLines: 3 });
+		const row = tool(`chunks-${expanded}`);
+		row.setExpanded(expanded);
+		let text = "";
+		for (const chunk of ["first  ", "\r", "\n\r\nsecond", " part\nthird\n", "  \n", "fourth\n\nfifth\n"]) {
+			text += chunk;
+			row.updateResult({ content: [{ type: "text", text }] }, true);
+			const fresh = tool(`fresh-${expanded}`);
+			fresh.setExpanded(expanded);
+			fresh.updateResult({ content: [{ type: "text", text }] }, true);
+			assert.deepEqual(row.rendererState._liveOutputCache.collected, fresh.rendererState._liveOutputCache.collected);
+		}
+		row.updateResult({ content: [{ type: "text", text: "replacement\n\nlast" }] }, true);
+		assert.equal(row.rendererState._liveLineCount, 2);
+		assert.deepEqual(row.rendererState._liveOutputCache.collected.lines, ["replacement", "last"]);
+	});
+}
+
+test("unchanged running groups reuse their summary until content, time or animation changes", async () => {
+	await fire("agent_start");
+	try {
+		const chat = new Container();
+		const rows = Array.from({ length: 100 }, (_, i) => tool(`running-${i}`));
+		for (const row of rows) {
+			row.markExecutionStarted();
+			row.setArgsComplete();
+			chat.addChild(row);
+		}
+		const first = chat.render(100);
+		assert.match(plain(first), /Reading 100 files/);
+		let inspections = 0;
+		for (const row of rows) {
+			const result = row.result;
+			Object.defineProperty(row, "result", { configurable: true, get() { inspections++; return result; } });
+		}
+		for (let i = 0; i < 20; i++) assert.deepEqual(chat.render(100), first);
+		assert.equal(inspections, 0, "input redraws must not rescan every running tool");
+		now += 1000;
+		assert.match(plain(chat.render(100)), /1s/);
+		const row = rows[0];
+		Object.defineProperty(row, "result", { configurable: true, writable: true, value: undefined });
+		row.updateResult({ content: [{ type: "text", text: "failed" }], isError: true }, false);
+		assert.match(plain(chat.render(100)), /1 failed/);
+	} finally {
+		await fire("session_shutdown");
+	}
+});
 
 test("detached transcripts and tool groups can be garbage collected", async () => {
 	mock.reset(); // Mock call stacks retain their callers, including the UI components.

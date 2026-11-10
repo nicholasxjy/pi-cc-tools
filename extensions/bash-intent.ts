@@ -178,6 +178,7 @@ export function configureLocalIntents(enabled: boolean, onProblem?: (message: st
 	s.status = "idle";
 	s.queue = [];
 	s.inFlight.clear();
+	s.watchers.clear();
 }
 
 function report(s: LocalIntentState, message: string): void {
@@ -240,15 +241,19 @@ function saveCacheNow(s: LocalIntentState): void {
 	} catch { /* the cache is only an optimization */ }
 }
 
-process.once("exit", () => {
-	const s = (globalThis as any)[STATE_KEY] as LocalIntentState | undefined;
-	if (s?.saveTimer) {
-		clearTimeout(s.saveTimer);
-		s.saveTimer = undefined;
-		saveCacheNow(s);
-	}
-	if (s) stopHelper(s);
-});
+const EXIT_HOOK_KEY = Symbol.for("pi-claude-style-tools:bash-intent-exit-hook");
+if (!(globalThis as any)[EXIT_HOOK_KEY]) {
+	(globalThis as any)[EXIT_HOOK_KEY] = true;
+	process.once("exit", () => {
+		const s = (globalThis as any)[STATE_KEY] as LocalIntentState | undefined;
+		if (s?.saveTimer) {
+			clearTimeout(s.saveTimer);
+			s.saveTimer = undefined;
+			saveCacheNow(s);
+		}
+		if (s) stopHelper(s);
+	});
+}
 
 /** The label for a command, if one is known (this session or an earlier one). */
 export function localIntentFor(command: string): string | undefined {
@@ -281,6 +286,7 @@ export function requestLocalIntent(command: string): void {
 	if (localIntentFor(command) !== undefined) return;
 	if ([...s.inFlight.values()].includes(command) || s.queue.includes(command)) return;
 	if (s.status === "ready" && s.child) {
+		if (s.inFlight.size >= MAX_PENDING) return;
 		send(s, command);
 		return;
 	}
