@@ -16,6 +16,7 @@ function titleText(value: unknown): string {
 export function installTerminalTitle(
 	pi: ExtensionAPI,
 	describeActivity: (name: string, args: any) => string,
+	isEnabled: () => boolean,
 ): void {
 	let title = "";
 	let pendingWrite: ReturnType<typeof setImmediate> | undefined;
@@ -23,7 +24,7 @@ export function installTerminalTitle(
 
 	function write(ctx: ExtensionContext): void {
 		try {
-			if (title && ctx.mode === "tui" && ctx.hasUI) ctx.ui.setTitle(title);
+			if (title && ctx.mode === "tui" && ctx.hasUI && isEnabled()) ctx.ui.setTitle(title);
 		} catch { /* A closed terminal must not fail execution. */ }
 	}
 
@@ -53,7 +54,7 @@ export function installTerminalTitle(
 	}
 
 	pi.on("tool_execution_start", (event, ctx) => {
-		if (ctx.mode !== "tui" || !ctx.hasUI) return;
+		if (ctx.mode !== "tui" || !ctx.hasUI || !isEnabled()) return;
 		const parent = (event as typeof event & { parentToolCallId?: string }).parentToolCallId;
 		if (parent && namedExecutions.has(parent)) {
 			namedExecutions.add(event.toolCallId);

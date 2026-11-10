@@ -20,5 +20,6 @@
   "showTruncationHints": false,
   "themeAdaptive": true,
   "terminalTheme": true,
+  "terminalTitle": true,
   "diffColors": {}
 }
