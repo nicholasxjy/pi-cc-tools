@@ -89,6 +89,34 @@ try {
 	if (!edit.rendererState._wdt || edit.rendererState._wdt.includes("rendering diff")) throw new Error("Diff did not settle");
 	const used = process.cpuUsage(cpu);
 	results.push({ name: "replace-5000-unrelated-words", iterations: 1, msPerOperation: performance.now() - start, cpuMsPerOperation: (used.user + used.system) / 1000 });
+	for (const [name, tail] of [
+		["single-diff-98k-ascii", "shared ".repeat(14_000)],
+		["single-diff-50k-unicode", "宽🙂e\u0301".repeat(10_000)],
+	]) {
+		const iterations = 5;
+		const diffStart = performance.now();
+		const diffCpu = process.cpuUsage();
+		for (let i = 0; i < iterations; i++) {
+			const oldText = `before-${i} ${tail}`;
+			const newText = `after-${i} ${tail}`;
+			const preview = row("write", { path: "single.txt", content: newText });
+			preview.setArgsComplete();
+			preview.updateResult({ content: [], details: { _type: "diff", summary: "+1 -1", diff: {
+				lines: [
+					{ type: "del", oldNum: 1, newNum: null, content: oldText },
+					{ type: "add", oldNum: null, newNum: 1, content: newText },
+				], added: 1, removed: 1, chars: oldText.length + newText.length,
+			} } }, false);
+			for (let frame = 0; frame < 20; frame++) {
+				preview.render(100);
+				await setImmediate();
+				if (preview.rendererState._wdt && !preview.rendererState._wdt.includes("rendering diff")) break;
+			}
+			if (!preview.rendererState._wdt || preview.rendererState._wdt.includes("rendering diff")) throw new Error("Single diff did not settle");
+		}
+		const diffUsed = process.cpuUsage(diffCpu);
+		results.push({ name, iterations, msPerOperation: (performance.now() - diffStart) / iterations, cpuMsPerOperation: (diffUsed.user + diffUsed.system) / 1000 / iterations });
+	}
 	const oldLines = Array.from({ length: 1500 }, (_, i) => `before-${i}`).join("\n");
 	const newLines = Array.from({ length: 1500 }, (_, i) => `after-${i}`).join("\n");
 	const path = join(root, "replacement.txt");

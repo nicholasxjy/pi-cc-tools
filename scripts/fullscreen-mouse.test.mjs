@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { performance } from "node:perf_hooks";
+import { setImmediate } from "node:timers/promises";
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,7 +14,7 @@ if (major === 0 && minor < 85) {
 const extensionPath = resolve(fileURLToPath(new URL("../extensions/index.ts", import.meta.url)));
 const { initTheme } = await import(`${root}/dist/modes/interactive/theme/theme.js`);
 initTheme("dark", false);
-const { Container, TuiAltScreen, getCapabilities, setCapabilityOverrides } = await import(`${root}/node_modules/@earendil-works/pi-tui/dist/index.js`);
+const { Container, ScrollView, TuiAltScreen, getCapabilities, setCapabilityOverrides } = await import(`${root}/node_modules/@earendil-works/pi-tui/dist/index.js`);
 const { renderLayoutFrame } = await import(`${root}/node_modules/@earendil-works/pi-tui/dist/layout.js`);
 const { dispatchMouseEvent } = await import(`${root}/node_modules/@earendil-works/pi-tui/dist/tui.js`);
 const {
@@ -324,6 +326,53 @@ for (const name of ["codemode", "fabric_exec"]) {
 	}
 	console.log(`ok ${name} five-line preview expands and collapses through fullscreen clicks`);
 }
+
+// Keep wheel events responsive while history diff previews and assistant text update together.
+const writeDefinition = extension.tools.get("write");
+const write = writeDefinition?.definition ?? writeDefinition;
+const diffChat = new Container();
+const diffRows = Array.from({ length: 40 }, (_, index) => {
+	const row = new ToolExecutionComponent("write", `diff-${index}`, { path: `${index}.ts`, content: "after" }, undefined, write, ui, process.cwd());
+	row.setArgsComplete();
+	const lines = Array.from({ length: 40 }, (_, i) => ({
+		type: i % 2 ? "add" : "del", oldNum: i % 2 ? null : i + 1, newNum: i % 2 ? i + 1 : null,
+		content: `const value${index}_${Math.floor(i / 2)} = ${i % 2 ? "2" : "1"};`,
+	}));
+	row.updateResult({ content: [], details: { _type: "diff", summary: "+20 -20", language: "typescript", diff: { lines, added: 20, removed: 20, chars: 2000 } } }, false);
+	diffChat.addChild(row);
+	return row;
+});
+const diffStream = new AssistantMessageComponent();
+diffChat.addChild(diffStream);
+const diffView = new ScrollView(diffChat, { primary: true, follow: "end" });
+const diffTui = new TuiAltScreen({ columns: 100, rows: 24, write() {} }, false, undefined, { mouse: true });
+diffTui.setLayoutRoot(diffView);
+const diffFrame = () => { diffTui.currentLayout = renderLayoutFrame(diffView, 100, 24, () => {}); };
+const settledDiffs = () => diffRows.filter((row) => row.rendererState._wdt && !row.rendererState._wdt.includes("rendering diff")).length;
+const inputStart = performance.now();
+diffFrame();
+await setImmediate();
+assert.ok(settledDiffs() < diffRows.length, "input runs before every history diff has finished rendering");
+console.log(`ok diff input callback after ${(performance.now() - inputStart).toFixed(2)} ms`);
+const streamAndScroll = (index) => {
+	diffStream.updateContent({ role: "assistant", stopReason: "pending", content: [{ type: "text", text: `Streaming ${index}` }] }, true);
+	diffFrame();
+	diffView.scrollToEnd();
+	const before = diffView.scrollTop;
+	diffTui.handleViewportInput("\x1b[<64;4;4M");
+	assert.ok(diffView.scrollTop < before, "wheel scrolls up while output is streaming");
+	const scrolled = diffView.scrollTop;
+	diffFrame();
+	assert.equal(diffView.scrollTop, scrolled, "stream updates keep the user's scroll position");
+};
+for (let i = 0; i < 200 && settledDiffs() < diffRows.length; i++) {
+	streamAndScroll(i);
+	await setImmediate();
+}
+assert.equal(settledDiffs(), diffRows.length, "every diff finishes while streaming and scrolling continue");
+const scrollStart = performance.now();
+for (let i = 0; i < 50; i++) streamAndScroll(i);
+console.log(`ok 40 settled diffs with streaming and fullscreen wheel: ${((performance.now() - scrollStart) / 50).toFixed(3)} ms/frame`);
 
 if (failures.length) {
 	console.error(failures.join("\n"));
