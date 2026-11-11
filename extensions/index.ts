@@ -2462,7 +2462,7 @@ function thoughtDurationSummaryText(ms: number): string {
 	return thinkingSummaryStyledText(`Thought for ${formatThoughtDuration(ms)}`);
 }
 
-/** Single-line hidden thinking row — no Text paddingX or thinking symbol. */
+/** Single-line hidden thinking row with a copy-excluded status gutter. */
 class HiddenThinkingSummary {
 	private body: string;
 	private hovered = false;
@@ -2503,7 +2503,10 @@ class HiddenThinkingSummary {
 			return this.cachedLines;
 		}
 		const summary = thinkingSummaryStyledText(this.body, this.hovered);
-		const text = this.body === "Thinking…" ? thinkingGutter() + summary.slice(3) : summary;
+		const gutter = this.body === "Thinking…"
+			? thinkingGutter()
+			: copySkip(` ${paintStatusDot(safeFgAnsi(_lastSeenTheme, "border") ?? "\x1b[34m")} `);
+		const text = gutter + summary.slice(3);
 		const line = padRenderedLineToWidth(clampLineWidth(text, safeWidth), safeWidth);
 		this.cachedWidth = width;
 		this.cachedHovered = this.hovered;
