@@ -1,0 +1,116 @@
+{
+  "environment": {
+    "node": "v26.13.0",
+    "platform": "darwin/arm64",
+    "width": 100,
+    "layout": "unified"
+  },
+  "method": "Three independent Node processes per version, five fresh diff components per scenario per process. Summary uses the median of the three process averages. Times include component creation, diff presentation, asynchronous scheduling and terminal line layout. Baseline already includes the cooperative diff scheduling fix.",
+  "command": "node --experimental-strip-types scripts/benchmark-performance.mts",
+  "fixtures": {
+    "single-diff-98k-ascii": "98,000 ASCII code units per side plus a short changed prefix.",
+    "single-diff-50k-unicode": "50,000 UTF-16 code units per side, mixing CJK, emoji and combining accents, plus a short changed prefix."
+  },
+  "summary": [
+    {
+      "name": "single-diff-98k-ascii",
+      "beforeMs": 5.227391599999987,
+      "afterMs": 0.9958084000000099,
+      "reductionPercent": 80.95018555717134
+    },
+    {
+      "name": "single-diff-50k-unicode",
+      "beforeMs": 18.299016600000005,
+      "afterMs": 2.1627500000000053,
+      "reductionPercent": 88.18105886629992
+    }
+  ],
+  "beforeRuns": [
+    [
+      {
+        "name": "single-diff-98k-ascii",
+        "iterations": 5,
+        "msPerOperation": 5.227391599999987,
+        "cpuMsPerOperation": 6.33
+      },
+      {
+        "name": "single-diff-50k-unicode",
+        "iterations": 5,
+        "msPerOperation": 18.299016600000005,
+        "cpuMsPerOperation": 23.3826
+      }
+    ],
+    [
+      {
+        "name": "single-diff-98k-ascii",
+        "iterations": 5,
+        "msPerOperation": 5.126716599999986,
+        "cpuMsPerOperation": 6.4798
+      },
+      {
+        "name": "single-diff-50k-unicode",
+        "iterations": 5,
+        "msPerOperation": 18.03185000000001,
+        "cpuMsPerOperation": 22.9396
+      }
+    ],
+    [
+      {
+        "name": "single-diff-98k-ascii",
+        "iterations": 5,
+        "msPerOperation": 5.6430499999999935,
+        "cpuMsPerOperation": 6.5994
+      },
+      {
+        "name": "single-diff-50k-unicode",
+        "iterations": 5,
+        "msPerOperation": 18.394508399999996,
+        "cpuMsPerOperation": 23.3284
+      }
+    ]
+  ],
+  "afterRuns": [
+    [
+      {
+        "name": "single-diff-98k-ascii",
+        "iterations": 5,
+        "msPerOperation": 0.7312584000000015,
+        "cpuMsPerOperation": 1.1952
+      },
+      {
+        "name": "single-diff-50k-unicode",
+        "iterations": 5,
+        "msPerOperation": 2.0807915999999977,
+        "cpuMsPerOperation": 2.3444
+      }
+    ],
+    [
+      {
+        "name": "single-diff-98k-ascii",
+        "iterations": 5,
+        "msPerOperation": 0.9958084000000099,
+        "cpuMsPerOperation": 4.8292
+      },
+      {
+        "name": "single-diff-50k-unicode",
+        "iterations": 5,
+        "msPerOperation": 3.0707999999999855,
+        "cpuMsPerOperation": 5.1938
+      }
+    ],
+    [
+      {
+        "name": "single-diff-98k-ascii",
+        "iterations": 5,
+        "msPerOperation": 1.8710915999999997,
+        "cpuMsPerOperation": 6.139200000000001
+      },
+      {
+        "name": "single-diff-50k-unicode",
+        "iterations": 5,
+        "msPerOperation": 2.1627500000000053,
+        "cpuMsPerOperation": 3.7496
+      }
+    ]
+  ]
+}

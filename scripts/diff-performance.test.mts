@@ -15,7 +15,8 @@ const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 process.chdir(root);
 process.env.PI_CODING_AGENT_DIR = root;
 writeFileSync(join(root, "settings.json"), JSON.stringify({ terminalTheme: false }));
-const { ToolExecutionComponent } = await import("@earendil-works/pi-coding-agent");
+const { AssistantMessageComponent, ToolExecutionComponent } = await import("@earendil-works/pi-coding-agent");
+const { Container } = await import("@earendil-works/pi-tui");
 const { initTheme } = await import("../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js");
 initTheme("dark", false);
 const { wordDiff } = await import(new URL("./diff/word.js", import.meta.resolve("diff")).href);
@@ -78,6 +79,52 @@ for (const width of [100, 240]) {
 	});
 }
 
+for (const mode of ["unified", "split", "auto"]) {
+	const width = mode === "unified" ? 100 : 240;
+	test(`a single oversized Unicode diff only segments visible text in ${mode} layout`, async (t) => {
+		layout(mode);
+		const segment = Intl.Segmenter.prototype.segment;
+		let graphemes = 0;
+		t.mock.method(Intl.Segmenter.prototype, "segment", function (this: Intl.Segmenter, input: string) {
+			const segments = segment.call(this, input);
+			if (input.length < 4096) return segments;
+			return {
+				containing: segments.containing.bind(segments),
+				*[Symbol.iterator]() {
+					for (const part of segments) {
+						graphemes++;
+						yield part;
+					}
+				},
+			};
+		});
+		const tail = "宽🙂e\u0301".repeat(10_000);
+		const oldText = `before ${tail}`;
+		const newText = `after ${tail}`;
+		const start = performance.now();
+		const row = await renderDiff(oldText, newText, width);
+		t.diagnostic(`single Unicode diff: ${(performance.now() - start).toFixed(2)} ms; ${graphemes} long-input graphemes visited`);
+		assert.ok(graphemes < 2000, "layout must stop segmenting after the visible wrap budget, including width measurement");
+		const output = plain(row.render(width).join("\n"));
+		assert.match(output, /before/);
+		assert.match(output, /after/);
+		assert.match(output, /宽🙂e\u0301/);
+		assert.match(output, /›/);
+		const shorter = await renderDiff(`before ${tail.slice(0, 6000)}`, `after ${tail.slice(0, 6000)}`, width);
+		assert.deepEqual(row.render(width), shorter.render(width), "hidden suffix length must not change the visible text, styles or truncation");
+	});
+}
+
+test("short diff lines keep emoji intact across syntax color changes", async () => {
+	layout("unified");
+	const faces = "👩\x1b[31m‍💻\x1b[0m".repeat(30);
+	const row = await renderDiff(`before ${faces} END`, `after ${faces} END`, 100);
+	const output = plain(row.render(100).join("\n"));
+	assert.ok(output.includes("👩‍💻".repeat(30)));
+	assert.match(output, /END/);
+	assert.doesNotMatch(output, /›/);
+});
+
 test("a large replacement has bounded presentation work and writes the exact requested content", async (t) => {
 	const oldText = Array.from({ length: 1500 }, (_, i) => `old-${i}`).join("\n");
 	const newText = Array.from({ length: 1500 }, (_, i) => `new-${i}`).join("\n");
@@ -105,6 +152,64 @@ test("normal edits analyze words once, including when syntax highlighting is cap
 	}
 });
 
+
+test("diff history yields to input while previews settle and reuses layout during streaming", async (t) => {
+	layout("unified");
+	const chat = new Container();
+	const rows = Array.from({ length: 40 }, (_, index) => {
+		const row = new ToolExecutionComponent("write", `history-${index}`, { path: `history-${index}.txt`, content: "after" }, {}, tools.get("write"), { requestRender() {} } as any, root) as any;
+		row.setArgsComplete();
+		const lines = Array.from({ length: 40 }, (_, i) => ({
+			type: i % 2 ? "add" : "del", oldNum: i % 2 ? null : i + 1, newNum: i % 2 ? i + 1 : null,
+			content: `const value${index}_${Math.floor(i / 2)} = ${i % 2 ? "after" : "before"}; ${"shared context ".repeat(50)}`,
+		}));
+		row.updateResult({ content: [], details: { _type: "diff", summary: "+20 -20", diff: { lines, added: 20, removed: 20, chars: 60_000 } } }, false);
+		chat.addChild(row);
+		return row;
+	});
+	const start = performance.now();
+	const input = setImmediate().then(() => {
+		const settled = rows.filter((row) => row.rendererState._wdt && !row.rendererState._wdt.includes("rendering diff")).length;
+		t.diagnostic(`input callback after ${(performance.now() - start).toFixed(2)} ms; ${settled}/${rows.length} previews already computed`);
+		assert.ok(settled < rows.length, "diff previews must yield to input instead of draining the entire history in microtasks");
+	});
+	chat.render(100);
+	await input;
+	for (let i = 0; i < 200; i++) {
+		chat.render(100);
+		await setImmediate();
+		if (rows.every((row) => row.rendererState._wdt && !row.rendererState._wdt.includes("rendering diff"))) break;
+	}
+	assert.ok(rows.every((row) => row.rendererState._wdt && !row.rendererState._wdt.includes("rendering diff")), "all queued previews eventually finish");
+	chat.render(100);
+	const stream = new AssistantMessageComponent();
+	chat.addChild(stream);
+	const calls = t.mock.method(wordDiff, "diff");
+	const frameStart = performance.now();
+	for (let i = 0; i < 50; i++) {
+		stream.updateContent({ role: "assistant", stopReason: "pending", content: [{ type: "text", text: `Streaming ${i}` }] } as any, true);
+		chat.render(100);
+	}
+	t.diagnostic(`streaming with 40 settled diffs: ${((performance.now() - frameStart) / 50).toFixed(3)} ms/frame`);
+	assert.equal(calls.mock.callCount(), 0, "streaming and scrolling must reuse settled word analysis");
+});
+
+test("a failed preview does not stall subsequent diffs", async (t) => {
+	layout("unified");
+	const original = wordDiff.diff;
+	let fail = true;
+	t.mock.method(wordDiff, "diff", function (this: any, ...args: any[]) {
+		if (fail) {
+			fail = false;
+			throw new Error("preview failed");
+		}
+		return original.apply(this, args);
+	});
+	const failed = await renderDiff("before", "after", 100);
+	assert.doesNotMatch(plain(failed.render(100).join("\n")), /rendering diff/);
+	const next = await renderDiff("const count = 1;", "const count = 2;", 100);
+	assert.match(plain(next.render(100).join("\n")), /const count = 2;/);
+});
 
 test("edit summaries survive resizing and expansion", async (t) => {
 	const args = { path: "missing.txt", edits: [{ oldText: "before\n", newText: "after\n" }] };

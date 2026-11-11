@@ -5928,8 +5928,17 @@ interface ParsedDiff {
 	simplified?: boolean;
 }
 
-function diffStrip(value: string): string {
-	return value.replace(ANSI_RE, "");
+function diffTextWidth(value: string, maxWidth: number): number {
+	const plain = value.replace(ANSI_RE, "");
+	if (plain.includes("\x1b")) return visibleWidth(plain);
+	if (ASCII_PLAIN_RE.test(plain)) return plain.length;
+	let columns = 0;
+	// Measure after removing styles so a grapheme spanning SGR sequences stays whole.
+	for (const { segment } of GRAPHEME_SEGMENTER.segment(plain)) {
+		columns += graphemeWidth(segment);
+		if (columns > maxWidth) break;
+	}
+	return columns;
 }
 
 function tabs(text: string): string {
@@ -6007,32 +6016,29 @@ interface AnsiCell {
  * laid out in cells, so measuring `text.length` (UTF-16 units) overflowed every CJK line
  * into the next column.
  */
-function toCells(text: string): AnsiCell[] {
-	const cells: AnsiCell[] = [];
-	const pushPlain = (plain: string): void => {
-		if (!plain) return;
+function* toCells(text: string): Generator<AnsiCell> {
+	function* plainCells(plain: string): Generator<AnsiCell> {
 		if (ASCII_PLAIN_RE.test(plain)) {
-			for (let i = 0; i < plain.length; i++) cells.push({ text: plain[i], width: 1 });
+			for (let i = 0; i < plain.length; i++) yield { text: plain[i], width: 1 };
 			return;
 		}
 		for (const { segment } of GRAPHEME_SEGMENTER.segment(plain)) {
-			cells.push({ text: segment, width: graphemeWidth(segment) });
+			yield { text: segment, width: graphemeWidth(segment) };
 		}
-	};
+	}
 	let last = 0;
 	for (const match of text.matchAll(ANSI_RE)) {
 		const start = match.index ?? 0;
-		pushPlain(text.slice(last, start));
-		cells.push({ text: match[0], width: 0 });
+		yield* plainCells(text.slice(last, start));
+		yield { text: match[0], width: 0 };
 		last = start + match[0].length;
 	}
-	pushPlain(text.slice(last));
-	return cells;
+	yield* plainCells(text.slice(last));
 }
 
 function fit(value: string, width: number): string {
 	if (width <= 0) return "";
-	const plainWidth = visibleWidth(diffStrip(value));
+	const plainWidth = diffTextWidth(value, width);
 	if (plainWidth <= width) return value + " ".repeat(width - plainWidth);
 	const showWidth = width > 2 ? width - 1 : width;
 	let out = "";
@@ -6085,12 +6091,19 @@ function normalizeShikiContrast(ansi: string): string {
 
 function wrapAnsi(text: string, width: number, maxRows = adaptiveWrapRows(), fillBg = ""): string[] {
 	if (width <= 0) return [""];
-	const plainWidth = visibleWidth(diffStrip(text));
+	const plainWidth = diffTextWidth(text, width);
 	if (plainWidth <= width) {
 		const pad = width - plainWidth;
 		return pad > 0 ? [text + fillBg + " ".repeat(pad) + (fillBg ? D_RST : "")] : [text];
 	}
-	const cells = toCells(text);
+	const cells: AnsiCell[] = [];
+	let columns = 0;
+	// One overflow cell is enough to detect clipping; hidden tails need no layout.
+	for (const cell of toCells(text)) {
+		cells.push(cell);
+		columns += cell.width;
+		if (columns > Math.max(2, width) * maxRows) break;
+	}
 
 	const rows: string[] = [];
 	let row = "";
@@ -6220,7 +6233,7 @@ function shouldUseSplit(diff: ParsedDiff, tw: number, maxRows = MAX_PREVIEW_LINE
 	for (const line of vis) {
 		if (line.type === "sep") continue;
 		contentLines++;
-		if (visibleWidth(tabs(line.content)) > cw) wrapCandidates++;
+		if (diffTextWidth(tabs(line.content), cw) > cw) wrapCandidates++;
 	}
 	if (contentLines === 0) return true;
 	const wrapRatio = wrapCandidates / contentLines;
@@ -6472,7 +6485,28 @@ function injectBg(ansiLine: string, ranges: Array<[number, number]>, baseBg: str
 	return out + D_RST;
 }
 
-async function renderUnified(
+let diffRenderQueue: Promise<void> = Promise.resolve();
+
+function scheduleDiffRender(render: () => Promise<string>): Promise<string> {
+	// Promise-only batches starve input and scroll events while history previews settle.
+	const pending = diffRenderQueue
+		.then(() => new Promise<void>((resolve) => setImmediate(resolve)))
+		.then(render);
+	diffRenderQueue = pending.then(() => {}, () => {});
+	return pending;
+}
+
+function renderUnified(
+	diff: ParsedDiff,
+	language: BundledLanguage | undefined,
+	max = MAX_RENDER_LINES,
+	dc: DiffColors = DEFAULT_DIFF_COLORS,
+	width = termW(),
+): Promise<string> {
+	return scheduleDiffRender(() => renderUnifiedNow(diff, language, max, dc, width));
+}
+
+async function renderUnifiedNow(
 	diff: ParsedDiff,
 	language: BundledLanguage | undefined,
 	max = MAX_RENDER_LINES,
@@ -6565,7 +6599,17 @@ async function renderUnified(
 	return out.join("\n");
 }
 
-async function renderSplit(
+function renderSplit(
+	diff: ParsedDiff,
+	language: BundledLanguage | undefined,
+	max = MAX_PREVIEW_LINES,
+	dc: DiffColors = DEFAULT_DIFF_COLORS,
+	width = termW(),
+): Promise<string> {
+	return scheduleDiffRender(() => renderSplitNow(diff, language, max, dc, width));
+}
+
+async function renderSplitNow(
 	diff: ParsedDiff,
 	language: BundledLanguage | undefined,
 	max = MAX_PREVIEW_LINES,
@@ -6573,7 +6617,7 @@ async function renderSplit(
 	width = termW(),
 ): Promise<string> {
 	const tw = width;
-	if (!shouldUseSplit(diff, tw, max)) return renderUnified(diff, language, max, dc, width);
+	if (!shouldUseSplit(diff, tw, max)) return renderUnifiedNow(diff, language, max, dc, width);
 	if (!diff.lines.length) return "";
 
 	type Row = { left: DiffLine | null; right: DiffLine | null };
