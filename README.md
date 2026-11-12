@@ -27,6 +27,8 @@ Built-in tools (`read`, `bash`, `grep`, `find`, `ls`, `edit`, `write`), MCP tool
 
 `edit` and `write` show the change as a diff with syntax highlighting and word-level marks. Several edits to one file are listed one after the other. On wide terminals the diff can also use a side-by-side layout.
 
+While `edit`, `write` and `apply_patch` arguments stream in, **Progressive output** shows the latest text immediately, with added and removed text in diff colors. For edits, it follows the latest edit block as its original and replacement text arrive. The preview uses `diffCollapsedLines` (up to 150 lines when expanded) and a 32,000-character window; long lines are clipped to the row width. It reuses unchanged visible text and defers line comparison, word marks and syntax highlighting until the arguments are complete (or the write finishes).
+
 ![A two-part edit shown as a diff](https://raw.githubusercontent.com/FammasMaz/pi-cc-tools/master/docs/media/edit-diff.png)
 
 Shell commands that only change files are drawn the same way. `sed -i`, `perl -pi`, heredocs (`cat > file <<EOF`, `tee`) and `echo … > file` show up as `Edit (sed) pyproject.toml` or `Create (heredoc) CHANGELOG.md`, with a diff of what actually changed on disk. The command runs unchanged and the model sees its normal output. Anything ambiguous, like a pipe or a variable, stays a regular bash row.

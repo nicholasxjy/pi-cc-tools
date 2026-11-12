@@ -3947,6 +3947,7 @@ function syncLiveToolRenderState(component: any): void {
 	} else if (component?.isPartial !== true) {
 		delete state._liveLineCount;
 		delete state._liveOutputCache;
+		delete state._progressiveDiff;
 		// renderCall never sees the result, so hand a finished edit's details over: its diff is redrawn from them, not from
 		// the file. A call aborted while streaming ends with a bare error instead of a toolResult; it never drew a diff.
 		if (component?.toolName === "edit" && component.result && (!ctxLike.isError || component.result.role === "toolResult")) {
@@ -6008,6 +6009,36 @@ function diffWidthReady(ctx: any): boolean {
 	return true;
 }
 
+function renderProgressiveDiffCall(ctx: any, header: string, source: string, theme: Theme, marker = ""): Text {
+	if (!source) return makeText(ctx.lastComponent, header);
+	const limit = Math.min(ctx.expanded ? MAX_RENDER_LINES : diffCollapsedLimit(), MAX_RENDER_LINES);
+	const width = contextDiffWidth(ctx);
+	// Bound work before splitting or measuring: argument streams can contain very large files.
+	const tail = source.slice(-MAX_HL_CHARS);
+	let lines = tail.split("\n");
+	if (lines.at(-1) === "") lines.pop();
+	if (tail.length < source.length) {
+		// Drop a cut first line or grapheme so the preview still follows the stream's tail.
+		if (lines.length > 1) lines.shift();
+		else {
+			const line = lines[0] ?? "";
+			lines = [line.slice(GRAPHEME_SEGMENTER.segment(line).containing(0)?.segment.length ?? 0)];
+		}
+	}
+	const clipped = tail.length < source.length || lines.length > limit;
+	const text = lines.slice(-limit).join("\n");
+	const key = `${width}:${marker}:${clipped}:${_toolBranchVisualEpoch}:${text}`;
+	if (ctx.state._progressiveDiff?.key !== key) {
+		const body = text.split("\n").map((line) => {
+			const code = `${marker}${line.replace(/\r$/, "")}`;
+			const color = code.startsWith("+") ? "toolDiffAdded" : code.startsWith("-") ? "toolDiffRemoved" : "dim";
+			return theme.fg(color, fit(tabs(code), width));
+		}).join("\n");
+		ctx.state._progressiveDiff = { key, body: `${theme.fg("muted", "Progressive output")}${clipped ? `\n${theme.fg("muted", "… earlier content omitted")}` : ""}\n${body}` };
+	}
+	return makeResponsiveDiffText(ctx, ctx.lastComponent, `${header}\n${withBranch(ctx.state._progressiveDiff.body, theme, false, true)}`);
+}
+
 function adaptiveWrapRows(tw?: number): number {
 	const width = tw ?? termW();
 	if (width >= 180) return MAX_WRAP_ROWS_WIDE;
@@ -7965,11 +7996,16 @@ function getApplyPatchResultMeta(args: any, ctx: any, sp: (path: string) => stri
 
 function renderApplyPatchCall(args: any, theme: Theme, ctx: any, sp: (path: string) => string): Text {
 	syncToolCallStatus(ctx);
-	const patchText = getStringArg(args, "patchText", "patch_text");
-	const summary = stableCallSummary(ctx, "_callSummary", () => summarizeOpenAiToolCall("apply_patch", args, theme, sp));
+	const rawPatch = args?.patchText ?? args?.patch_text;
+	const patchText = typeof rawPatch === "string" ? rawPatch : "";
+	const summary = stableCallSummary(ctx, "_callSummary", () => {
+		if (ctx.argsComplete || !ctx.isPartial) return summarizeOpenAiToolCall("apply_patch", args, theme, sp);
+		const firstFile = /^\*\*\* (?:Add|Update|Delete) File: (.+)$/m.exec(patchText.slice(0, MAX_HL_CHARS));
+		return firstFile ? sp(firstFile[1].trim()) : theme.fg("muted", "patch");
+	});
 	const hdr = toolHeader("Apply Patch", summary, theme, toolStatusDot(ctx, theme), liveLineCountTrailing(ctx, theme));
 
-	if (!ctx.argsComplete) return makeText(ctx.lastComponent, hdr);
+	if (!ctx.argsComplete) return ctx.isPartial ? renderProgressiveDiffCall(ctx, hdr, patchText, theme) : makeText(ctx.lastComponent, hdr);
 	const preview = getCachedApplyPatchPreview(patchText, sp, ctx);
 	if (!preview || preview.changes.length === 0) {
 		ctx.state._openAiPatchFiles = [];
@@ -9460,10 +9496,10 @@ export default function (pi: ExtensionAPI) {
 			const label = wasNew === true ? "Create" : "Write";
 			const summary = stableCallSummary(ctx, "_callSummary", () => {
 				const base = sp(fp);
-				return shouldRevealCallArgs(ctx) ? `${base} ${theme.fg("muted", `(${lineCount(args.content ?? "")} lines)`)}` : base;
+				return ctx.argsComplete || !ctx.isPartial ? `${base} ${theme.fg("muted", `(${lineCount(args.content ?? "")} lines)`)}` : base;
 			}, revealSummary);
 			const hdr = toolHeader(label, summary, theme, toolStatusDot(ctx, theme), liveLineCountTrailing(ctx, theme));
-			return makeText(ctx.lastComponent, hdr);
+			return ctx.isPartial ? renderProgressiveDiffCall(ctx, hdr, typeof args?.content === "string" ? args.content : "", theme, "+") : makeText(ctx.lastComponent, hdr);
 		},
 		renderResult(result, { expanded, isPartial }, theme, ctx) {
 			if (isPartial) {
@@ -9613,6 +9649,12 @@ export default function (pi: ExtensionAPI) {
 			const hdr = toolHeader("Edit", summary, theme, toolStatusDot(ctx, theme), liveLineCountTrailing(ctx, theme));
 			// History replay never sets argsComplete; a finished edit is drawn from its result instead.
 			const finished = ctx.state._editResult as Record<string, unknown> | undefined;
+			if (!ctx.argsComplete && !finished && ctx.isPartial) {
+				const edit = (Array.isArray(args?.edits) ? args.edits.at(-1) : args) as Record<string, unknown> | undefined;
+				const hasNewText = hasOwnArg(edit, "newText") || hasOwnArg(edit, "new_text");
+				const text = hasNewText ? edit?.newText ?? edit?.new_text : edit?.oldText ?? edit?.old_text;
+				return renderProgressiveDiffCall(ctx, hdr, typeof text === "string" ? text : "", theme, hasNewText ? "+" : "-");
+			}
 			if (!((ctx.argsComplete || finished) && operations.length > 0)) return makeText(ctx.lastComponent, hdr);
 			if (!diffWidthReady(ctx)) {
 				const pending = liveBranchDisplay(ctx.state, theme) ?? withBranch(theme.fg("muted", "(rendering…)"), theme, false, true);
