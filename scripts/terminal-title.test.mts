@@ -69,7 +69,7 @@ function harness(t: test.TestContext, mode = "tui", hasUI = true) {
 	return { ctx, pi, titles, saved, fire, start, setBranch: (entries: any[]) => { branch = entries; } };
 }
 
-test("the spinner writes tool activities and keeps the last step after completion", async (t) => {
+test("the spinner writes tool activities and keeps the last step without a final response", async (t) => {
 	const h = harness(t);
 	for (const [tool, args, expected] of [
 		["read", { path: "/project/src/app.ts" }, "Reading app.ts"],
@@ -87,6 +87,83 @@ test("the spinner writes tool activities and keeps the last step after completio
 	await tick();
 	assert.equal(h.titles.at(-1), "Waiting for your answer");
 	assert.equal(h.saved.length, 5, "only a changed step creates a session entry");
+});
+
+test("completed tasks replace the last activity with the final response summary", async (t) => {
+	const h = harness(t);
+	await h.start("bash", { command: "npm test", displaySummary: "验证修复" });
+	await h.fire("agent_end", { messages: [{
+		role: "assistant",
+		content: [{ type: "text", text: "已修复标题完成提醒。\n\n相关测试全部通过。" }],
+		stopReason: "stop",
+	}] });
+	await h.fire("agent_settled");
+	h.ctx.ui.setTitle("Pi's default title");
+	await tick();
+	assert.equal(h.titles.at(-1), "✓ 已修复标题完成提醒。");
+	assert.equal(h.saved.at(-1).data.title, "✓ 已修复标题完成提醒。");
+	const resumed = harness(t);
+	resumed.setBranch([...h.saved]);
+	await resumed.fire("session_start", { reason: "reload" });
+	await tick();
+	assert.equal(resumed.titles.at(-1), "✓ 已修复标题完成提醒。");
+	await resumed.start("read", { path: "next.ts" });
+	assert.equal(resumed.titles.at(-1), "Reading next.ts");
+});
+
+test("responses without tools produce safe, bounded completion titles", async (t) => {
+	for (const [text, expected] of [
+		["\n  Answer ready.\r\n\nMore details.", "✓ Answer ready."],
+		["", "✓ Completed"],
+		["\x1b[31m已完成\x1b[0m\x07\x9c", "✓ 已完成"],
+		["🚀".repeat(121), `✓ ${"🚀".repeat(117)}…`],
+	]) {
+		const h = harness(t);
+		await h.fire("agent_end", { messages: [{
+			role: "assistant",
+			content: [{ type: "thinking", thinking: "Private reasoning" }, { type: "text", text }],
+			stopReason: "stop",
+		}] });
+		await h.fire("agent_settled", { aborted: false });
+		await tick();
+		assert.equal(h.titles.at(-1), expected);
+		assert.equal(h.saved.at(-1).data.title, expected);
+	}
+});
+
+test("completion waits for settlement and uses the latest run's response", async (t) => {
+	const h = harness(t);
+	await h.start("bash", { displaySummary: "Running checks" });
+	for (const text of ["Intermediate result", "Final result"]) {
+		await h.fire("agent_start");
+		await h.fire("agent_end", { messages: [{
+			role: "assistant", content: [{ type: "text", text }], stopReason: "stop",
+		}] });
+		await tick();
+		assert.deepEqual(h.titles, ["Running checks"], "low-level runs must not announce completion");
+		assert.equal(h.saved.length, 1);
+	}
+	await h.fire("agent_settled", { aborted: false });
+	await tick();
+	assert.equal(h.titles.at(-1), "✓ Final result");
+});
+
+test("failed, aborted and unfinished runs do not reuse an earlier completion", async (t) => {
+	for (const stopReason of ["error", "aborted", "length", "toolUse", "stop", undefined]) {
+		const h = harness(t);
+		await h.start("bash", { displaySummary: "Running checks" });
+		await h.fire("agent_end", { messages: [{
+			role: "assistant", content: [{ type: "text", text: "Earlier result" }], stopReason: "stop",
+		}] });
+		await h.fire("agent_start");
+		await h.fire("agent_end", { messages: stopReason ? [{
+			role: "assistant", content: [{ type: "text", text: "Latest result" }], stopReason,
+		}] : [] });
+		await h.fire("agent_settled", { aborted: stopReason === "stop" });
+		await tick();
+		assert.equal(h.titles.at(-1), "Running checks", String(stopReason));
+		assert.equal(h.saved.length, 1);
+	}
 });
 
 test("terminalTitle accepts booleans from project and agent settings", async (t) => {
@@ -113,6 +190,9 @@ test("disabled terminalTitle suppresses tool, resume, tree and lifecycle writes"
 	}
 	await h.start("fabric_exec", { display: { name: "Milestone" } }, "outer");
 	await h.start("read", { path: "app.ts" }, "child", "outer");
+	await h.fire("agent_end", { messages: [{ role: "assistant", content: [], stopReason: "stop" }] });
+	await h.fire("agent_settled", { aborted: false });
+	await tick();
 	assert.deepEqual(h.titles, []);
 	assert.deepEqual(h.saved, []);
 });
@@ -210,7 +290,8 @@ test("RPC, print, JSON and contexts without UI do not write or record titles", a
 		h.setBranch([entry("Saved step")]);
 		await h.fire("session_start");
 		await h.start("bash", { command: "npm test", displaySummary: "Verify tests" });
-		await h.fire("agent_settled");
+		await h.fire("agent_end", { messages: [{ role: "assistant", content: [], stopReason: "stop" }] });
+		await h.fire("agent_settled", { aborted: false });
 		await tick();
 		assert.deepEqual(h.titles, [], mode);
 		assert.deepEqual(h.saved, [], mode);

@@ -39,7 +39,7 @@ Shell commands that only change files are drawn the same way. `sed -i`, `perl -p
 
 While a tool runs, the working line names it: `Running npm test…`, `Reading stats.py…`, `Searching for TODO…`, `Waiting for agent: Find edge cases…`. While the model thinks, it shows a playful verb instead. The token count covers everything the model writes for the request, including thinking and tool arguments, and counts up smoothly as text streams in.
 
-The terminal tab or window title also shows the latest execution step. It uses a declared `display.name` (such as Fabric's milestone) or `displaySummary` when available, otherwise the same tool activity descriptions as the working line. A named execution keeps its title while nested tools run. The title stays until the next step and is restored from the current branch on resume or reload. This runs only in interactive terminal sessions. Set `"terminalTitle": false` in settings to disable these title updates and stop saving new title entries; run `/reload` after editing the setting.
+The terminal tab or window title also shows the latest execution step. It uses a declared `display.name` (such as Fabric's milestone) or `displaySummary` when available, otherwise the same tool activity descriptions as the working line. A named execution keeps its title while nested tools run. Once the full task settles, the title changes to `✓` followed by the first non-empty line of the final response (or `✓ Completed` for an empty response). Failed or aborted runs keep the latest step. The title stays until the next step and is restored from the current branch on resume or reload. This runs only in interactive terminal sessions. Set `"terminalTitle": false` in settings to disable these title updates and stop saving new title entries; run `/reload` after editing the setting.
 
 ![The working line during a run](https://raw.githubusercontent.com/FammasMaz/pi-cc-tools/master/docs/media/spinner.gif)
 
@@ -149,7 +149,7 @@ Scripts use pi's built-in highlighting and syntax colors: JavaScript for codemod
 | `toolBackground` | `transparent` | `transparent` draws no rules, `outlines` draws a rule above and below each tool (`border` also works), `default` keeps pi's tool backgrounds |
 | `groupToolCalls` | `true` | Fold consecutive tool calls into one row |
 | `thinkingMode` | `live` | `live` collapses finished thinking to `Thought for Xs`, `full` keeps it expanded, `latest` hides it in all but the latest message |
-| `terminalTitle` | `true` | Show the latest execution step in the terminal title. `false` disables extension title writes and saving new title entries; run `/reload` after editing |
+| `terminalTitle` | `true` | Show the latest execution step and final response summary in the terminal title. `false` disables extension title writes and saving new title entries; run `/reload` after editing |
 | `previewLines` | `8` | Lines in a collapsed preview |
 | `codemodePreviewLines` | `5` | Visible terminal lines in each collapsed codemode or Fabric script and output preview; `0` hides both previews. Accepts non-negative integers; invalid values use `5` |
 | `expandedPreviewMaxLines` | `4000` | Line limit when a row is expanded |
