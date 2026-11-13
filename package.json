@@ -57,7 +57,8 @@
   },
   "dependencies": {
     "@shikijs/cli": "^4.0.2",
-    "diff": "^9.0.0"
+    "diff": "^9.0.0",
+    "marked": "15.0.12"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

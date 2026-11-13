@@ -131,6 +131,37 @@ test("responses without tools produce safe, bounded completion titles", async (t
 	}
 });
 
+test("completion titles show Markdown as plain text and survive reload", async (t) => {
+	for (const [text, expected] of [
+		["## **已修复** `terminal-title.ts`，见[验证结果](https://example.test/checks).\n\n更多说明。", "✓ 已修复 terminal-title.ts，见验证结果."],
+		["> - **完成**：*测试*和~~旧问题~~已处理。", "✓ 完成：测试和旧问题已处理。"],
+		["---\n\n```ts\nconst name = 'a_b*c';\n```", "✓ const name = 'a_b*c';"],
+		["已修复[标题][result]。\n\n[result]: https://example.test/checks", "✓ 已修复标题。"],
+		["**更新 `config_a_b`**，保留 `**literal**` 和 \\*星号\\*。", "✓ 更新 config_a_b，保留 **literal** 和 *星号*。"],
+		["![验证通过](https://example.test/result.png)", "✓ 验证通过"],
+		["1. **已完成**\n2. 下一步", "✓ 已完成"],
+		["| **检查** | `结果` |\n| --- | --- |\n| 测试 | 通过 |", "✓ 检查 结果"],
+		["**已完成**  \n下一行", "✓ 已完成"],
+		["`a < b && c > d`", "✓ a < b && c > d"],
+		["---\n\n<!-- done -->", "✓ Completed"],
+		[`**${"🚀".repeat(121)}**`, `✓ ${"🚀".repeat(117)}…`],
+	]) {
+		const h = harness(t);
+		await h.fire("agent_end", { messages: [{
+			role: "assistant", content: [{ type: "text", text }], stopReason: "stop",
+		}] });
+		await h.fire("agent_settled");
+		await tick();
+		assert.equal(h.titles.at(-1), expected, text);
+		assert.equal(h.saved.at(-1).data.title, expected);
+		const resumed = harness(t);
+		resumed.setBranch([...h.saved]);
+		await resumed.fire("session_start", { reason: "reload" });
+		await tick();
+		assert.equal(resumed.titles.at(-1), expected);
+	}
+});
+
 test("completion waits for settlement and uses the latest run's response", async (t) => {
 	const h = harness(t);
 	await h.start("bash", { displaySummary: "Running checks" });

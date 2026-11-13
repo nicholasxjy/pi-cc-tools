@@ -1,5 +1,6 @@
 import { stripVTControlCharacters } from "node:util";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Lexer, type Token, type Tokens } from "marked";
 
 const TITLE_ENTRY_TYPE = "pi-claude-code-ui-terminal-title";
 
@@ -11,6 +12,20 @@ function titleText(value: unknown): string {
 		.trim();
 	const chars = Array.from(text);
 	return chars.length > 120 ? `${chars.slice(0, 119).join("").trimEnd()}…` : text;
+}
+
+function markdownText(tokens: Token[]): string {
+	return tokens.map((token) => {
+		if (token.type === "html") return "";
+		if (token.type === "br" || token.type === "space" || token.type === "hr") return "\n";
+		if (token.type === "list") return markdownText(token.items);
+		if (token.type === "table") {
+			const rows: Tokens.TableCell[][] = [token.header, ...token.rows];
+			return `${rows.map((row) => row.map((cell) => markdownText(cell.tokens)).join(" ")).join("\n")}\n`;
+		}
+		const text = "tokens" in token && token.tokens ? markdownText(token.tokens) : "text" in token ? token.text : "";
+		return ["paragraph", "heading", "blockquote", "list_item", "code"].includes(token.type) ? `${text}\n` : text;
+	}).join("");
 }
 
 export function installTerminalTitle(
@@ -87,10 +102,11 @@ export function installTerminalTitle(
 			const message = event.messages[i];
 			if (message.role !== "assistant") continue;
 			if (message.stopReason === "stop") {
-				const summary = message.content
+				const text = message.content
 					.filter((block) => block.type === "text")
 					.map((block) => block.text)
-					.join("\n")
+					.join("\n");
+				const summary = markdownText(Lexer.lex(text))
 					.split(/\r?\n/)
 					.find((line) => line.trim());
 				completionTitle = titleText(`✓ ${summary?.trim() || "Completed"}`);
