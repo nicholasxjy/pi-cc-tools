@@ -227,6 +227,23 @@ test("unchanged running groups reuse their summary until content, time or animat
 	}
 });
 
+test("tool updates dirty their group without cascading theme invalidation", (t) => {
+	const chat = new Container();
+	const first = tool("group-dirty-first");
+	const second = tool("group-dirty-second");
+	for (const row of [first, second]) {
+		row.updateResult({ content: [{ type: "text", text: "done" }] }, false);
+		chat.addChild(row);
+	}
+	chat.render(100);
+	const group = chat.children[0] as any;
+	const invalidations = t.mock.method(group, "invalidate");
+	second.updateResult({ content: [{ type: "text", text: "failed" }], isError: true }, false);
+	assert.equal(invalidations.mock.callCount(), 0, "content changes need not recheck the group's theme");
+	group.setExpanded(true);
+	assert.match(plain(chat.render(100)), /failed/);
+});
+
 test("detached transcripts and tool groups can be garbage collected", async () => {
 	mock.reset(); // Mock call stacks retain their callers, including the UI components.
 	const refs = (() => {

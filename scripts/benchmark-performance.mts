@@ -19,7 +19,7 @@ const { ToolExecutionComponent } = await import("@earendil-works/pi-coding-agent
 const { Container } = await import("@earendil-works/pi-tui");
 const { initTheme } = await import("../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js");
 initTheme("dark", false);
-const tools = new Map<string, any>();
+const tools = new Map<string, any>([["apply_patch", { name: "apply_patch", description: "Apply a patch", parameters: {}, execute() {} }]]);
 const handlers = new Map<string, any[]>();
 (await import("../extensions/index.ts")).default({
 	registerTool: (tool: any) => tools.set(tool.name, tool),
@@ -44,6 +44,7 @@ function measure(name: string, iterations: number, work: (index: number) => void
 	results.push({ name, iterations, msPerOperation: duration / iterations, cpuMsPerOperation: (used.user + used.system) / 1000 / iterations });
 }
 try {
+	await fire("before_agent_start");
 	await fire("agent_start");
 	const chat = new Container();
 	for (let i = 0; i < 200; i++) {
@@ -126,6 +127,32 @@ try {
 	await tools.get("write").execute("benchmark-replacement", { path, content: newLines });
 	const lineUsed = process.cpuUsage(lineCpu);
 	results.push({ name: "replace-1500-lines", iterations: 1, msPerOperation: performance.now() - lineStart, cpuMsPerOperation: (lineUsed.user + lineUsed.system) / 1000 });
+	const argumentText = Array.from({ length: 50_000 }, (_, i) => `line-${i}`).join("\n");
+	for (const name of ["write", "edit", "apply_patch"]) {
+		const argumentRow = row(name, {});
+		measure(`${name}-50000-lines-argument-stream`, 100, (i) => {
+			const content = `${argumentText}\nlatest-${i}`;
+			argumentRow.updateArgs(name === "write" ? { path: "arguments.txt", content }
+				: name === "edit" ? { path: "missing.txt", edits: [{ oldText: "before", newText: content }] }
+				: { patchText: `*** Begin Patch\n*** Add File: arguments.txt\n${content}` });
+			argumentRow.render(100);
+		});
+
+		const content = "shared context ".repeat(4000);
+		const cached = row(name, name === "write" ? { path: "cached.txt", content }
+			: name === "edit" ? { path: "missing.txt", edits: [{ oldText: "before", newText: content }] }
+			: { patchText: `*** Begin Patch\n*** Add File: cached.txt\n+${content}\n*** End Patch` });
+		cached.setArgsComplete();
+		if (name === "write") cached.updateResult({ content: [], details: { _type: "new", filePath: "cached.txt", lines: 1 } }, false);
+		const field = name === "write" ? "_nft" : name === "edit" ? "_ptBody" : "_applyPatchPreviewBody";
+		for (let frame = 0; frame < 100; frame++) {
+			const output = cached.render(100).join("\n");
+			await setImmediate();
+			if (cached.rendererState[field] && !output.includes("rendering")) break;
+		}
+		if (!cached.rendererState[field] || cached.rendererState[field].includes("rendering")) throw new Error("Cached diff did not settle");
+		measure(`${name}-60k-diff-invalidate`, 100, () => { cached.invalidate(); cached.render(100); });
+	}
 	const preview = script.resultRendererComponent.children[1];
 	console.log(JSON.stringify({ node: process.version, platform: `${process.platform}/${process.arch}`, width: 100,
 		retainedPreviewRows: preview.toolCachedLines.length, results }, null, 2));

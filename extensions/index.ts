@@ -1174,7 +1174,7 @@ class ToolGroupComponent extends Container {
 	/** When the group's current run started, for the "· 3s" on a running header. */
 	private runStartedAt?: number;
 
-	private clearRenderCache(): void {
+	clearRenderCache(): void {
 		this.dirty = true;
 		this.cachedWidth = undefined;
 		this.cachedEpoch = undefined;
@@ -1220,8 +1220,6 @@ class ToolGroupComponent extends Container {
 		this.clearRenderCache();
 		// Exception: a theme switch (Pi calls ui.invalidate()) changes colors the
 		// child renderers baked into their text, so those must re-run once.
-		// (Child invalidation re-enters here via clearToolRenderCache; the palette is
-		// recorded first so that re-entry is a no-op.)
 		const palette = currentThemePaletteFingerprint();
 		if (palette === undefined || palette === this.paletteFingerprint) return;
 		const changed = this.paletteFingerprint !== undefined;
@@ -1255,7 +1253,7 @@ class ToolGroupComponent extends Container {
 		// Unchanged groups reuse their layout until content, time or animation changes.
 		// Remember the palette this group was drawn with (see invalidate()).
 		if (this.paletteFingerprint === undefined) this.paletteFingerprint = currentThemePaletteFingerprint();
-		// Child mutations mark dirty via clearToolRenderCache → invalidate().
+		// Child mutations mark dirty without repeating the theme invalidation pass.
 		if (
 			!this.dirty
 			&& this.cachedLines
@@ -1774,15 +1772,6 @@ function summarizeText(text: string, max = 60): string {
 	return `${oneLine.slice(0, Math.max(0, max - 3))}...`;
 }
 
-function hashText(text: string): string {
-	let hash = 2166136261;
-	for (let i = 0; i < text.length; i++) {
-		hash ^= text.charCodeAt(i);
-		hash = Math.imul(hash, 16777619);
-	}
-	return (hash >>> 0).toString(36);
-}
-
 let extraToolOutputExpanded = false;
 
 function syncExtraToolDetailMode(): void {
@@ -1843,7 +1832,7 @@ function clearToolRenderCache(value: unknown): void {
 	// settled headers/counts/child lines can't go stale after a child update.
 	// Only the parent group is touched — we do NOT cascade invalidate siblings.
 	const parent = (value as any)[COMPONENT_PARENT];
-	if (isToolGroupComponent(parent)) parent.invalidate();
+	if (isToolGroupComponent(parent)) parent.clearRenderCache();
 }
 
 /** Fullscreen hit-testing reads the layout recorded by the last render. */
@@ -3947,7 +3936,6 @@ function syncLiveToolRenderState(component: any): void {
 	} else if (component?.isPartial !== true) {
 		delete state._liveLineCount;
 		delete state._liveOutputCache;
-		delete state._progressiveDiff;
 		// renderCall never sees the result, so hand a finished edit's details over: its diff is redrawn from them, not from
 		// the file. A call aborted while streaming ends with a bare error instead of a toolResult; it never drew a diff.
 		if (component?.toolName === "edit" && component.result && (!ctxLike.isError || component.result.role === "toolResult")) {
@@ -4267,13 +4255,14 @@ function stableCallSummary(ctx: any, key: string, build: () => string, reveal = 
 	const state = ctx?.state;
 	const cached = state?.[key];
 	const completeKey = `${key}Complete`;
+	const complete = ctx?.argsComplete === true || ctx?.isPartial === false;
 	if (!reveal) return typeof cached === "string" ? cached : "";
-	if (ctx?.argsComplete === true && state?.[completeKey] === true && typeof cached === "string") return cached;
+	if (complete && state?.[completeKey] === true && typeof cached === "string") return cached;
 	if (!shouldRevealCallArgs(ctx) && typeof cached === "string" && cached) return cached;
 	const summary = build();
 	if (state) {
 		state[key] = summary;
-		if (ctx?.argsComplete === true) state[completeKey] = true;
+		if (complete) state[completeKey] = true;
 		else delete state[completeKey];
 	}
 	return summary;
@@ -6009,36 +5998,6 @@ function diffWidthReady(ctx: any): boolean {
 	return true;
 }
 
-function renderProgressiveDiffCall(ctx: any, header: string, source: string, theme: Theme, marker = ""): Text {
-	if (!source) return makeText(ctx.lastComponent, header);
-	const limit = Math.min(ctx.expanded ? MAX_RENDER_LINES : diffCollapsedLimit(), MAX_RENDER_LINES);
-	const width = contextDiffWidth(ctx);
-	// Bound work before splitting or measuring: argument streams can contain very large files.
-	const tail = source.slice(-MAX_HL_CHARS);
-	let lines = tail.split("\n");
-	if (lines.at(-1) === "") lines.pop();
-	if (tail.length < source.length) {
-		// Drop a cut first line or grapheme so the preview still follows the stream's tail.
-		if (lines.length > 1) lines.shift();
-		else {
-			const line = lines[0] ?? "";
-			lines = [line.slice(GRAPHEME_SEGMENTER.segment(line).containing(0)?.segment.length ?? 0)];
-		}
-	}
-	const clipped = tail.length < source.length || lines.length > limit;
-	const text = lines.slice(-limit).join("\n");
-	const key = `${width}:${marker}:${clipped}:${_toolBranchVisualEpoch}:${text}`;
-	if (ctx.state._progressiveDiff?.key !== key) {
-		const body = text.split("\n").map((line) => {
-			const code = `${marker}${line.replace(/\r$/, "")}`;
-			const color = code.startsWith("+") ? "toolDiffAdded" : code.startsWith("-") ? "toolDiffRemoved" : "dim";
-			return theme.fg(color, fit(tabs(code), width));
-		}).join("\n");
-		ctx.state._progressiveDiff = { key, body: `${theme.fg("muted", "Progressive output")}${clipped ? `\n${theme.fg("muted", "… earlier content omitted")}` : ""}\n${body}` };
-	}
-	return makeResponsiveDiffText(ctx, ctx.lastComponent, `${header}\n${withBranch(ctx.state._progressiveDiff.body, theme, false, true)}`);
-}
-
 function adaptiveWrapRows(tw?: number): number {
 	const width = tw ?? termW();
 	if (width >= 180) return MAX_WRAP_ROWS_WIDE;
@@ -6470,12 +6429,15 @@ function parseDiff(oldContent: string, newContent: string, ctxLines = 3): Parsed
 }
 
 function getCachedParsedDiff(ctx: any, key: string, oldContent: string, newContent: string): ParsedDiff {
-	if (ctx.state?._parsedDiffKey === key && ctx.state._parsedDiff) {
+	if (ctx.state?._parsedDiffKey === key && ctx.state._parsedDiffOld === oldContent && ctx.state._parsedDiffNew === newContent && ctx.state._parsedDiff) {
 		return ctx.state._parsedDiff as ParsedDiff;
 	}
 	const diff = parseDiff(oldContent, newContent);
 	if (ctx.state) {
+		ctx.state._parsedDiffVersion = (ctx.state._parsedDiffVersion ?? 0) + 1;
 		ctx.state._parsedDiffKey = key;
+		ctx.state._parsedDiffOld = oldContent;
+		ctx.state._parsedDiffNew = newContent;
 		ctx.state._parsedDiff = diff;
 	}
 	return diff;
@@ -6836,12 +6798,16 @@ function summarizeEditOperations(operations: Array<{ oldText: string; newText: s
 type EditOperationSummary = ReturnType<typeof summarizeEditOperations>;
 
 function getCachedEditOperationSummary(ctx: any, key: string, operations: Array<{ oldText: string; newText: string }>): EditOperationSummary {
-	if (ctx.state?._editSummaryKey === key && ctx.state._editSummary) {
+	const previous = ctx.state?._editSummaryOperations as typeof operations | undefined;
+	if (ctx.state?._editSummaryKey === key && ctx.state._editSummary && previous?.length === operations.length
+		&& operations.every((edit, i) => edit.oldText === previous[i].oldText && edit.newText === previous[i].newText)) {
 		return ctx.state._editSummary as EditOperationSummary;
 	}
 	const summary = summarizeEditOperations(operations);
 	if (ctx.state) {
+		ctx.state._editSummaryVersion = (ctx.state._editSummaryVersion ?? 0) + 1;
 		ctx.state._editSummaryKey = key;
+		ctx.state._editSummaryOperations = operations;
 		ctx.state._editSummary = summary;
 	}
 	return summary;
@@ -7970,14 +7936,16 @@ function formatApplyPatchLine(change: ApplyPatchChangePreview, theme: Theme): st
 
 function getCachedApplyPatchPreview(patchText: string, sp: (path: string) => string, ctx: any): ApplyPatchPreview | null {
 	if (!patchText) return null;
-	const key = `apply-meta:${ctx.cwd ?? process.cwd()}:${hashText(patchText)}`;
-	if (ctx.state?._applyPatchMetaKey === key && ctx.state._applyPatchPreview) {
+	const key = `apply-meta:${ctx.cwd ?? process.cwd()}`;
+	if (ctx.state?._applyPatchMetaKey === key && ctx.state._applyPatchSource === patchText && ctx.state._applyPatchPreview) {
 		return ctx.state._applyPatchPreview as ApplyPatchPreview;
 	}
 	try {
 		const preview = parseApplyPatchPreview(patchText, sp, ctx.cwd ?? process.cwd());
 		if (ctx.state) {
+			ctx.state._applyPatchVersion = (ctx.state._applyPatchVersion ?? 0) + 1;
 			ctx.state._applyPatchMetaKey = key;
+			ctx.state._applyPatchSource = patchText;
 			ctx.state._applyPatchPreview = preview;
 			ctx.state._applyPatchMeta = buildApplyPatchResultMeta(preview);
 		}
@@ -8005,7 +7973,7 @@ function renderApplyPatchCall(args: any, theme: Theme, ctx: any, sp: (path: stri
 	});
 	const hdr = toolHeader("Apply Patch", summary, theme, toolStatusDot(ctx, theme), liveLineCountTrailing(ctx, theme));
 
-	if (!ctx.argsComplete) return ctx.isPartial ? renderProgressiveDiffCall(ctx, hdr, patchText, theme) : makeText(ctx.lastComponent, hdr);
+	if (!ctx.argsComplete) return makeText(ctx.lastComponent, hdr);
 	const preview = getCachedApplyPatchPreview(patchText, sp, ctx);
 	if (!preview || preview.changes.length === 0) {
 		ctx.state._openAiPatchFiles = [];
@@ -8017,7 +7985,7 @@ function renderApplyPatchCall(args: any, theme: Theme, ctx: any, sp: (path: stri
 		return makeResponsiveDiffText(ctx, ctx.lastComponent, `${hdr}\n${withBranch(theme.fg("muted", "(rendering…)"), theme, false, true)}`);
 	}
 	const diffWidth = contextDiffWidth(ctx);
-	const key = `apply-preview:${ctx.state._applyPatchMetaKey ?? hashText(patchText)}:${diffWidth}:${ctx.expanded ? 1 : 0}:${_toolBranchVisualEpoch}`;
+	const key = `apply-preview:${ctx.state._applyPatchVersion}:${diffWidth}:${ctx.expanded ? 1 : 0}:${_toolBranchVisualEpoch}`;
 	if (ctx.state._applyPatchPreviewKey !== key) {
 		ctx.state._applyPatchPreviewKey = key;
 		ctx.state._applyPatchPreviewBody = theme.fg("muted", "(rendering…)");
@@ -8543,7 +8511,7 @@ function renderBashFileEditResult(edit: BashFileEdit, records: BashFileEditRecor
 	if (records === undefined) {
 		// Rows from before diffs were recorded: a heredoc or echo still says what it wrote.
 		if (edit.content === undefined || edit.kind !== "write") return undefined;
-		const diff = getCachedParsedDiff(ctx, `bfe-content:${hashText(edit.content)}`, "", edit.content);
+		const diff = getCachedParsedDiff(ctx, "bfe-content", "", edit.content);
 		records = [{ path: edit.paths[0], created: true, diff, language: lang(edit.paths[0]) }];
 	}
 	if (records.length === 0) return makeText(ctx.lastComponent, withBranch(theme.fg("muted", "✓ no changes"), theme));
@@ -9499,7 +9467,7 @@ export default function (pi: ExtensionAPI) {
 				return ctx.argsComplete || !ctx.isPartial ? `${base} ${theme.fg("muted", `(${lineCount(args.content ?? "")} lines)`)}` : base;
 			}, revealSummary);
 			const hdr = toolHeader(label, summary, theme, toolStatusDot(ctx, theme), liveLineCountTrailing(ctx, theme));
-			return ctx.isPartial ? renderProgressiveDiffCall(ctx, hdr, typeof args?.content === "string" ? args.content : "", theme, "+") : makeText(ctx.lastComponent, hdr);
+			return makeText(ctx.lastComponent, hdr);
 		},
 		renderResult(result, { expanded, isPartial }, theme, ctx) {
 			if (isPartial) {
@@ -9550,15 +9518,14 @@ export default function (pi: ExtensionAPI) {
 			if (d?._type === "new") {
 				const content = typeof ctx.args?.content === "string" ? ctx.args.content : "";
 				const lineTotal = typeof d.lines === "number" ? d.lines : lineCount(content);
-				const contentHash = hashText(content);
-				const syntheticDiff = getCachedParsedDiff(ctx, `nf-diff:${d.filePath}:${contentHash}`, "", content);
+				const syntheticDiff = getCachedParsedDiff(ctx, `nf-diff:${d.filePath}`, "", content);
 				const richSummary = diffSummaryWithMeta(syntheticDiff.added, 0, 1, "new file");
 				const previewLines = ctx.expanded ? MAX_RENDER_LINES : diffCollapsedLimit();
 				if (!diffWidthReady(ctx)) {
 					return makeResponsiveDiffText(ctx, ctx.lastComponent, withFinalBranchBlock(`${richSummary}\n${theme.fg("muted", "rendering diff…")}`, theme));
 				}
 				const diffWidth = contextDiffWidth(ctx);
-				const pk = `nf:${d.filePath}:${contentHash}:${diffWidth}:${ctx.expanded ? 1 : 0}:${_toolBranchVisualEpoch}`;
+				const pk = `nf:${d.filePath}:${ctx.state._parsedDiffVersion}:${diffWidth}:${ctx.expanded ? 1 : 0}:${_toolBranchVisualEpoch}`;
 				if (ctx.state._nfk !== pk) {
 					ctx.state._nfk = pk;
 					ctx.state._nft = withFinalBranchBlock(`${richSummary}\n${theme.fg("muted", "rendering diff…")}`, theme);
@@ -9649,21 +9616,14 @@ export default function (pi: ExtensionAPI) {
 			const hdr = toolHeader("Edit", summary, theme, toolStatusDot(ctx, theme), liveLineCountTrailing(ctx, theme));
 			// History replay never sets argsComplete; a finished edit is drawn from its result instead.
 			const finished = ctx.state._editResult as Record<string, unknown> | undefined;
-			if (!ctx.argsComplete && !finished && ctx.isPartial) {
-				const edit = (Array.isArray(args?.edits) ? args.edits.at(-1) : args) as Record<string, unknown> | undefined;
-				const hasNewText = hasOwnArg(edit, "newText") || hasOwnArg(edit, "new_text");
-				const text = hasNewText ? edit?.newText ?? edit?.new_text : edit?.oldText ?? edit?.old_text;
-				return renderProgressiveDiffCall(ctx, hdr, typeof text === "string" ? text : "", theme, hasNewText ? "+" : "-");
-			}
 			if (!((ctx.argsComplete || finished) && operations.length > 0)) return makeText(ctx.lastComponent, hdr);
 			if (!diffWidthReady(ctx)) {
 				const pending = liveBranchDisplay(ctx.state, theme) ?? withBranch(theme.fg("muted", "(rendering…)"), theme, false, true);
 				return makeResponsiveDiffText(ctx, ctx.lastComponent, `${hdr}\n${pending}`);
 			}
 			const diffWidth = contextDiffWidth(ctx);
-			const contentKey = `${fp}:${hashText(operations.map((edit) => `${edit.oldText}\u0000${edit.newText}`).join("\u0001"))}`;
-			const key = `edit:${contentKey}:${diffWidth}:${ctx.expanded ? 1 : 0}:${_toolBranchVisualEpoch}`;
-			const { diffs: fallbackDiffs, summary: editSummary } = getCachedEditOperationSummary(ctx, contentKey, operations);
+			const { diffs: fallbackDiffs, summary: editSummary } = getCachedEditOperationSummary(ctx, fp, operations);
+			const key = `edit:${fp}:${ctx.state._editSummaryVersion}:${diffWidth}:${ctx.expanded ? 1 : 0}:${_toolBranchVisualEpoch}`;
 			if (ctx.state._pk !== key) {
 				ctx.state._pk = key;
 				ctx.state._ptBody = theme.fg("muted", "(rendering…)");

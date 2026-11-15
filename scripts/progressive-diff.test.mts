@@ -9,14 +9,13 @@ import test from "node:test";
 import "./ts-resolve-loader.mjs";
 register("./ts-resolve-loader.mjs", import.meta.url);
 
-const root = mkdtempSync(join(tmpdir(), "progressive-diff-"));
+const root = mkdtempSync(join(tmpdir(), "diff-streaming-"));
 const previousCwd = process.cwd();
 const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 process.chdir(root);
 process.env.PI_CODING_AGENT_DIR = root;
 writeFileSync(join(root, "settings.json"), JSON.stringify({ terminalTheme: false, diffCollapsedLines: 3 }));
 const { ToolExecutionComponent } = await import("@earendil-works/pi-coding-agent");
-const { visibleWidth } = await import("@earendil-works/pi-tui");
 const { initTheme } = await import("../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js");
 initTheme("dark", false);
 const { wordDiff } = await import(new URL("./diff/word.js", import.meta.resolve("diff")).href);
@@ -38,128 +37,134 @@ test.after(() => {
 });
 const plain = (lines: string[]) => lines.join("\n").replace(/\x1b\[[0-9;]*m|\x1b\][^\x07]*\x07/g, "");
 let id = 0;
-const rowFor = (name: string, args: any = {}) => new ToolExecutionComponent(name, `progressive-${id++}`, args, {}, tools.get(name), { requestRender() {} } as any, root) as any;
-
-async function settle(row: any) {
+const rowFor = (name: string, args: any = {}) => new ToolExecutionComponent(name, `streaming-${id++}`, args, {}, tools.get(name), { requestRender() {} } as any, root) as any;
+async function settle(row: any, field: string) {
 	for (let i = 0; i < 100; i++) {
 		const output = plain(row.render(100));
 		await setImmediate();
-		if (row.rendererState._ptBody && !output.includes("rendering")) return output;
+		if (row.rendererState[field] && !output.includes("rendering")) return output;
 	}
 	throw new Error("Diff did not settle");
 }
 
-test("write content appears as it arrives, keeps whitespace, and clears on completion", async () => {
-	const row = rowFor("write", { path: "new.ts" });
-	assert.doesNotMatch(plain(row.render(100)), /Progressive output/);
-	row.updateArgs({ path: "new.ts", content: "    const value =" });
-	assert.match(plain(row.render(100)), /Progressive output[\s\S]*\+    const value =/);
-	row.updateArgs({ path: "new.ts", content: "    const value = 1;\r\n\r\nend" });
-	assert.match(plain(row.render(100)), /\+    const value = 1;/);
-	assert.match(plain(row.render(100)), /\+end/);
+for (const name of ["write", "edit", "apply_patch"]) {
+	test(`${name} argument streaming reuses the header layout without rendering file content`, (t) => {
+		const row = rowFor(name);
+		const history = Array.from({ length: 50_000 }, (_, i) => `line-${i}`).join("\n");
+		const words = t.mock.method(wordDiff, "diff");
+		const lines = t.mock.method(lineDiff, "diff");
+		let previous: string[] | undefined;
+		const start = performance.now();
+		for (let i = 0; i < 50; i++) {
+			const text = `${history}\nlatest-${i}`;
+			row.updateArgs(name === "write" ? { path: "large.txt", content: text }
+				: name === "edit" ? { path: "large.txt", edits: [{ oldText: "before", newText: text }] }
+				: { patchText: `*** Begin Patch\n*** Add File: large.txt\n${text}` });
+			const output = plain(row.render(100));
+			assert.match(output, /large\.txt/);
+			assert.doesNotMatch(output, /Progressive output|line-0\b|latest-/);
+			const layout = row.callRendererComponent.render(98);
+			if (previous) assert.equal(layout, previous, "unchanged header must reuse its line layout");
+			previous = layout;
+		}
+		t.diagnostic(`50,000 existing lines: ${((performance.now() - start) / 50).toFixed(3)} ms/update`);
+		assert.equal(words.mock.callCount(), 0);
+		assert.equal(lines.mock.callCount(), 0);
+		row.updateResult({ content: [{ type: "text", text: "Operation aborted" }], isError: true }, false);
+		assert.match(plain(row.render(100)), /Operation aborted/);
+	});
+}
+
+test("write keeps exact file content and shows its completed diff", async () => {
+	const content = "    const value = 1;\r\n\r\nend";
+	const row = rowFor("write", { path: "new.ts", content });
 	row.setArgsComplete();
-	assert.match(plain(row.render(100)), /Progressive output/);
-	const result = await tools.get("write").execute("write-stream", { path: "new.ts", content: "    const value = 1;\r\n\r\nend" });
+	const result = await tools.get("write").execute("write-stream", { path: "new.ts", content });
 	row.updateResult(result, false);
-	assert.equal(row.rendererState._progressiveDiff, undefined);
-	assert.doesNotMatch(plain(row.render(100)), /Progressive output/);
-	assert.equal(readFileSync(join(root, "new.ts"), "utf8"), "    const value = 1;\r\n\r\nend");
-	await setImmediate();
+	assert.equal(readFileSync(join(root, "new.ts"), "utf8"), content);
+	assert.match(await settle(row, "_nft"), /const value = 1;/);
 });
 
-test("edit streams the latest operation without caching incomplete file localization", async (t) => {
+test("edit waits for complete arguments before localization and shows every operation", async () => {
 	writeFileSync(join(root, "edit.ts"), "first\nbefore\nlast\n");
 	const row = rowFor("edit", { path: "edit.ts" });
-	const words = t.mock.method(wordDiff, "diff");
-	const lines = t.mock.method(lineDiff, "diff");
-	row.updateArgs({ path: "edit.ts", edits: [{ oldText: "before" }] });
-	assert.match(plain(row.render(100)), /-before/);
 	row.updateArgs({ path: "edit.ts", edits: [{ oldText: "before", newText: "aft" }] });
-	assert.match(plain(row.render(100)), /\+aft/);
-	row.updateArgs({ path: "edit.ts", edits: [{ oldText: "before", newText: "after" }, { oldText: "last", newText: "latest" }] });
-	assert.match(plain(row.render(100)), /\+latest/);
 	assert.equal(row.rendererState._editLocalized, undefined);
-	assert.equal(words.mock.callCount(), 0);
-	assert.equal(lines.mock.callCount(), 0);
+	row.updateArgs({ path: "edit.ts", edits: [{ oldText: "before", newText: "after" }, { oldText: "last", newText: "latest" }] });
 	row.setArgsComplete();
-	const output = await settle(row);
-	assert.doesNotMatch(output, /Progressive output/);
+	const output = await settle(row, "_ptBody");
 	assert.match(output, /Edit 1\/2.*at line 2/);
 	assert.match(output, /Edit 2\/2.*at line 3/);
 	assert.match(output, /after/);
 	assert.match(output, /latest/);
 });
 
-test("apply_patch streams incomplete patch text and switches to the parsed diff", async () => {
+test("apply_patch shows the parsed diff once arguments are complete", async () => {
 	const row = rowFor("apply_patch");
-	const patchText = "*** Begin Patch\n*** Add File: streamed.txt\n+first\n+secon";
-	row.updateArgs({ patchText });
-	assert.match(plain(row.render(100)), /Apply Patch streamed.txt/);
-	assert.match(plain(row.render(100)), /Progressive output[\s\S]*\+secon/);
-	row.updateArgs({ patch_text: `${patchText}d\n*** End Patch` });
+	row.updateArgs({ patch_text: "*** Begin Patch\n*** Add File: streamed.txt\n+first\n+second\n*** End Patch" });
 	row.setArgsComplete();
-	for (let i = 0; i < 100; i++) {
-		row.render(100);
-		await setImmediate();
-		if (row.rendererState._applyPatchPreviewBody?.includes("second")) break;
-	}
-	const output = plain(row.render(100));
-	assert.doesNotMatch(output, /Progressive output/);
+	const output = await settle(row, "_applyPatchPreviewBody");
 	assert.match(output, /first/);
 	assert.match(output, /second/);
 });
 
 for (const name of ["write", "edit", "apply_patch"]) {
-	test(`${name} streaming work stays bounded as a large argument grows`, async (t) => {
-		const row = rowFor(name);
-		const history = Array.from({ length: 50_000 }, (_, i) => `line-${i}`).join("\n");
-		const split = String.prototype.split;
-		let fullSplits = 0;
-		const spy = t.mock.method(String.prototype, "split", function (this: string, ...args: any[]) {
-			if (this.length >= history.length) fullSplits++;
-			return split.apply(this, args as any);
-		});
-		const words = t.mock.method(wordDiff, "diff");
-		const lines = t.mock.method(lineDiff, "diff");
-		const start = performance.now();
-		for (let i = 0; i < 50; i++) {
-			const text = `${history}\nlatest-${i}`;
-			const args = name === "write" ? { path: "large.txt", content: text }
-				: name === "edit" ? { path: "large.txt", edits: [{ oldText: "before", newText: text }] }
-				: { patchText: `*** Begin Patch\n*** Add File: large.txt\n${text}` };
+	test(`${name} content changes refresh the cache and supersede queued previews`, async () => {
+		const args: any = name === "write" ? { path: "refresh.txt", content: "initial" }
+			: name === "edit" ? { path: "missing.txt", edits: [{ oldText: "before", newText: "initial" }] }
+			: { patchText: "*** Begin Patch\n*** Add File: refresh.txt\n+initial\n*** End Patch" };
+		const row = rowFor(name, args);
+		row.setArgsComplete();
+		if (name === "write") row.updateResult({ content: [], details: { _type: "new", filePath: "refresh.txt", lines: 1 } }, false);
+		const field = name === "write" ? "_nft" : name === "edit" ? "_ptBody" : "_applyPatchPreviewBody";
+		await settle(row, field);
+		for (const text of ["obsolete", "newest"]) {
+			if (name === "write") args.content = text;
+			else if (name === "edit") args.edits[0].newText = text;
+			else args.patchText = `*** Begin Patch\n*** Add File: refresh.txt\n+${text}\n*** End Patch`;
 			row.updateArgs(args);
-			const output = plain(row.render(100));
-			assert.match(output, new RegExp(`latest-${i}\\b`));
-			assert.doesNotMatch(output, /line-0\b/);
-			assert.match(output, /earlier content omitted/);
+			row.render(100);
 		}
-		t.diagnostic(`50,000 existing lines: ${((performance.now() - start) / 50).toFixed(3)} ms/update`);
-		spy.mock.restore();
-		assert.equal(fullSplits, 0);
-		assert.equal(words.mock.callCount(), 0);
-		assert.equal(lines.mock.callCount(), 0);
-		const cache = row.rendererState._progressiveDiff;
-		row.invalidate();
-		row.render(100);
-		assert.equal(row.rendererState._progressiveDiff, cache, "redraws reuse the visible preview");
-		row.setExpanded(true);
-		assert.match(plain(row.render(100)), /line-49900/);
-		row.updateResult({ content: [{ type: "text", text: "Operation aborted" }], isError: true }, false);
-		assert.doesNotMatch(plain(row.render(100)), /Progressive output/);
-		assert.equal(row.rendererState._progressiveDiff, undefined);
-		await setImmediate();
+		const output = await settle(row, field);
+		assert.match(output, /newest/);
+		assert.doesNotMatch(output, /initial|obsolete/);
+	});
+
+	test(`${name} settled previews do not hash unchanged source again`, async (t) => {
+		const content = "shared context ".repeat(4000);
+		const args = name === "write" ? { path: "cached.txt", content }
+			: name === "edit" ? { path: "missing.txt", edits: [{ oldText: "before", newText: content }] }
+			: { patchText: `*** Begin Patch\n*** Add File: cached.txt\n+${content}\n*** End Patch` };
+		const row = rowFor(name, args);
+		// Resumed writes have a final result without ever receiving setArgsComplete().
+		if (name !== "write") row.setArgsComplete();
+		if (name === "write") row.updateResult({ content: [], details: { _type: "new", filePath: "cached.txt", lines: 1 } }, false);
+		const field = name === "write" ? "_nft" : name === "edit" ? "_ptBody" : "_applyPatchPreviewBody";
+		await settle(row, field);
+		const original = String.prototype.charCodeAt;
+		const split = String.prototype.split;
+		let scanned = 0;
+		let splits = 0;
+		String.prototype.split = function (this: string, ...args: any[]) {
+			if (this.length >= content.length) splits++;
+			return split.apply(this, args as any);
+		};
+		String.prototype.charCodeAt = function (this: string, index: number) {
+			if (this.length >= content.length) scanned++;
+			return original.call(this, index);
+		};
+		const start = performance.now();
+		try {
+			for (let i = 0; i < 10; i++) {
+				row.invalidate();
+				row.render(100);
+			}
+		} finally {
+			String.prototype.charCodeAt = original;
+			String.prototype.split = split;
+		}
+		t.diagnostic(`10 unchanged preview invalidations: ${scanned} source characters hashed, ${splits} full-source splits; ${(performance.now() - start).toFixed(2)} ms`);
+		assert.equal(splits, 0, "resumed history must reuse final summaries without splitting the file again");
+		assert.equal(scanned, 0, "warm diff redraws must reuse source identity rather than hash the whole file");
 	});
 }
-
-test("progressive rows keep CJK and emoji inside the terminal width", () => {
-	const row = rowFor("write");
-	for (const ending of ["", "\n"]) {
-		row.updateArgs({ path: "unicode.txt", content: `old head\n  ${"宽👩‍💻e\u0301".repeat(10_000)}${ending}` });
-		for (const width of [40, 100]) {
-			const output = plain(row.render(width));
-			assert.match(output, /宽👩‍💻e\u0301/);
-			assert.doesNotMatch(output, /\uFFFD|old head/);
-			assert.ok(output.split("\n").every((line) => visibleWidth(line) <= width));
-		}
-	}
-});

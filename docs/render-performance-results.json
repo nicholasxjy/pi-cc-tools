@@ -1,0 +1,680 @@
+{
+  "measuredAt": "2026-11-15T13:20:49.632174+00:00",
+  "baselineCommit": "7ad67434d81b4aa6477c58a1bd6807dd123382a9",
+  "baselineNote": "Baseline uses committed extensions except the pre-existing extensions/bash-intent.ts workspace changes, which were copied unchanged to both versions. Both use the same updated benchmark script.",
+  "method": "Three separate Node processes per version, run sequentially without concurrent test suites. Compare medians of each process mean. New scenarios perform 100 operations per process.",
+  "script": "scripts/benchmark-performance.mts",
+  "node": "v26.13.0",
+  "platform": "darwin/arm64",
+  "width": 100,
+  "comparison": [
+    {
+      "name": "running-group-200-warm",
+      "beforeMs": 0.0022370849999998653,
+      "afterMs": 0.002207085000000006,
+      "timeReductionPercent": 1.3410308504084978,
+      "beforeCpuMs": 0.009955,
+      "afterCpuMs": 0.012544999999999999
+    },
+    {
+      "name": "append-to-20000-lines",
+      "beforeMs": 0.3823554100000001,
+      "afterMs": 0.3799091699999997,
+      "timeReductionPercent": 0.6397817151326368,
+      "beforeCpuMs": 0.45481,
+      "afterCpuMs": 0.46354999999999996
+    },
+    {
+      "name": "fabric-20000-lines-first",
+      "beforeMs": 13.312667000000033,
+      "afterMs": 13.113291000000004,
+      "timeReductionPercent": 1.4976413065843852,
+      "beforeCpuMs": 17.721,
+      "afterCpuMs": 17.766
+    },
+    {
+      "name": "fabric-20000-lines-invalidate",
+      "beforeMs": 0.323433399999999,
+      "afterMs": 0.3655749999999898,
+      "timeReductionPercent": -13.029452122134266,
+      "beforeCpuMs": 0.3798,
+      "afterCpuMs": 0.437
+    },
+    {
+      "name": "replace-5000-unrelated-words",
+      "beforeMs": 3.637917000000016,
+      "afterMs": 3.7399580000000014,
+      "timeReductionPercent": -2.804929304324011,
+      "beforeCpuMs": 5.214,
+      "afterCpuMs": 4.659
+    },
+    {
+      "name": "single-diff-98k-ascii",
+      "beforeMs": 0.8508250000000089,
+      "afterMs": 0.7616250000000037,
+      "timeReductionPercent": 10.483942056240048,
+      "beforeCpuMs": 1.315,
+      "afterCpuMs": 1.2226000000000001
+    },
+    {
+      "name": "single-diff-50k-unicode",
+      "beforeMs": 2.296333400000003,
+      "afterMs": 2.206475,
+      "timeReductionPercent": 3.9131251585681204,
+      "beforeCpuMs": 2.5858,
+      "afterCpuMs": 2.5016
+    },
+    {
+      "name": "replace-1500-lines",
+      "beforeMs": 6.817000000000007,
+      "afterMs": 6.86708299999998,
+      "timeReductionPercent": -0.7346780108548057,
+      "beforeCpuMs": 10.811,
+      "afterCpuMs": 10.798
+    },
+    {
+      "name": "write-50000-lines-argument-stream",
+      "beforeMs": 1.51156833,
+      "afterMs": 0.018203750000000126,
+      "timeReductionPercent": 98.79570445882521,
+      "beforeCpuMs": 1.89853,
+      "afterCpuMs": 0.02037
+    },
+    {
+      "name": "write-60k-diff-invalidate",
+      "beforeMs": 0.1387404200000003,
+      "afterMs": 0.018648339999999736,
+      "timeReductionPercent": 86.55882690855363,
+      "beforeCpuMs": 0.18474000000000002,
+      "afterCpuMs": 0.05476
+    },
+    {
+      "name": "edit-50000-lines-argument-stream",
+      "beforeMs": 1.2851962500000003,
+      "afterMs": 0.016375419999999394,
+      "timeReductionPercent": 98.7258428430678,
+      "beforeCpuMs": 1.37754,
+      "afterCpuMs": 0.02713
+    },
+    {
+      "name": "edit-60k-diff-invalidate",
+      "beforeMs": 0.1278904200000011,
+      "afterMs": 0.02529875000000061,
+      "timeReductionPercent": 80.21841667264805,
+      "beforeCpuMs": 0.1561,
+      "afterCpuMs": 0.051050000000000005
+    },
+    {
+      "name": "apply_patch-50000-lines-argument-stream",
+      "beforeMs": 1.3823566600000003,
+      "afterMs": 0.10093834000000015,
+      "timeReductionPercent": 92.69809717558708,
+      "beforeCpuMs": 1.6225399999999999,
+      "afterCpuMs": 0.12276
+    },
+    {
+      "name": "apply_patch-60k-diff-invalidate",
+      "beforeMs": 0.11525708000000122,
+      "afterMs": 0.0129525000000001,
+      "timeReductionPercent": 88.76207865061308,
+      "beforeCpuMs": 0.14373,
+      "afterCpuMs": 0.01747
+    }
+  ],
+  "beforeRuns": [
+    {
+      "node": "v26.13.0",
+      "platform": "darwin/arm64",
+      "width": 100,
+      "retainedPreviewRows": 5,
+      "results": [
+        {
+          "name": "running-group-200-warm",
+          "iterations": 200,
+          "msPerOperation": 0.002266875000000255,
+          "cpuMsPerOperation": 0.009955
+        },
+        {
+          "name": "append-to-20000-lines",
+          "iterations": 100,
+          "msPerOperation": 0.38155167000000006,
+          "cpuMsPerOperation": 0.46473
+        },
+        {
+          "name": "fabric-20000-lines-first",
+          "iterations": 1,
+          "msPerOperation": 13.37566599999991,
+          "cpuMsPerOperation": 17.721
+        },
+        {
+          "name": "fabric-20000-lines-invalidate",
+          "iterations": 5,
+          "msPerOperation": 0.34585839999999735,
+          "cpuMsPerOperation": 0.4044
+        },
+        {
+          "name": "replace-5000-unrelated-words",
+          "iterations": 1,
+          "msPerOperation": 3.693499999999972,
+          "cpuMsPerOperation": 5.214
+        },
+        {
+          "name": "single-diff-98k-ascii",
+          "iterations": 5,
+          "msPerOperation": 0.8508250000000089,
+          "cpuMsPerOperation": 1.315
+        },
+        {
+          "name": "single-diff-50k-unicode",
+          "iterations": 5,
+          "msPerOperation": 2.296333400000003,
+          "cpuMsPerOperation": 2.5856000000000003
+        },
+        {
+          "name": "replace-1500-lines",
+          "iterations": 1,
+          "msPerOperation": 6.905916999999931,
+          "cpuMsPerOperation": 10.811
+        },
+        {
+          "name": "write-50000-lines-argument-stream",
+          "iterations": 100,
+          "msPerOperation": 1.56013417,
+          "cpuMsPerOperation": 1.9541
+        },
+        {
+          "name": "write-60k-diff-invalidate",
+          "iterations": 100,
+          "msPerOperation": 0.13838499999999954,
+          "cpuMsPerOperation": 0.18474000000000002
+        },
+        {
+          "name": "edit-50000-lines-argument-stream",
+          "iterations": 100,
+          "msPerOperation": 1.3353804200000012,
+          "cpuMsPerOperation": 1.42768
+        },
+        {
+          "name": "edit-60k-diff-invalidate",
+          "iterations": 100,
+          "msPerOperation": 0.13277041000000053,
+          "cpuMsPerOperation": 0.14428000000000002
+        },
+        {
+          "name": "apply_patch-50000-lines-argument-stream",
+          "iterations": 100,
+          "msPerOperation": 1.4061254200000008,
+          "cpuMsPerOperation": 1.6570500000000001
+        },
+        {
+          "name": "apply_patch-60k-diff-invalidate",
+          "iterations": 100,
+          "msPerOperation": 0.11321083000000044,
+          "cpuMsPerOperation": 0.14638
+        }
+      ]
+    },
+    {
+      "node": "v26.13.0",
+      "platform": "darwin/arm64",
+      "width": 100,
+      "retainedPreviewRows": 5,
+      "results": [
+        {
+          "name": "running-group-200-warm",
+          "iterations": 200,
+          "msPerOperation": 0.0022370849999998653,
+          "cpuMsPerOperation": 0.0097
+        },
+        {
+          "name": "append-to-20000-lines",
+          "iterations": 100,
+          "msPerOperation": 0.3860537499999998,
+          "cpuMsPerOperation": 0.41637
+        },
+        {
+          "name": "fabric-20000-lines-first",
+          "iterations": 1,
+          "msPerOperation": 12.948000000000093,
+          "cpuMsPerOperation": 17.449
+        },
+        {
+          "name": "fabric-20000-lines-invalidate",
+          "iterations": 5,
+          "msPerOperation": 0.32109179999999926,
+          "cpuMsPerOperation": 0.3754
+        },
+        {
+          "name": "replace-5000-unrelated-words",
+          "iterations": 1,
+          "msPerOperation": 3.5140420000000177,
+          "cpuMsPerOperation": 5.183
+        },
+        {
+          "name": "single-diff-98k-ascii",
+          "iterations": 5,
+          "msPerOperation": 0.8197750000000041,
+          "cpuMsPerOperation": 1.278
+        },
+        {
+          "name": "single-diff-50k-unicode",
+          "iterations": 5,
+          "msPerOperation": 2.2901084000000083,
+          "cpuMsPerOperation": 2.5858
+        },
+        {
+          "name": "replace-1500-lines",
+          "iterations": 1,
+          "msPerOperation": 6.605749999999944,
+          "cpuMsPerOperation": 10.552
+        },
+        {
+          "name": "write-50000-lines-argument-stream",
+          "iterations": 100,
+          "msPerOperation": 1.51156833,
+          "cpuMsPerOperation": 1.89191
+        },
+        {
+          "name": "write-60k-diff-invalidate",
+          "iterations": 100,
+          "msPerOperation": 0.1387404200000003,
+          "cpuMsPerOperation": 0.18108000000000002
+        },
+        {
+          "name": "edit-50000-lines-argument-stream",
+          "iterations": 100,
+          "msPerOperation": 1.2851962500000003,
+          "cpuMsPerOperation": 1.37754
+        },
+        {
+          "name": "edit-60k-diff-invalidate",
+          "iterations": 100,
+          "msPerOperation": 0.1278904200000011,
+          "cpuMsPerOperation": 0.15628999999999998
+        },
+        {
+          "name": "apply_patch-50000-lines-argument-stream",
+          "iterations": 100,
+          "msPerOperation": 1.365707910000001,
+          "cpuMsPerOperation": 1.6076499999999998
+        },
+        {
+          "name": "apply_patch-60k-diff-invalidate",
+          "iterations": 100,
+          "msPerOperation": 0.11816417000000001,
+          "cpuMsPerOperation": 0.14373
+        }
+      ]
+    },
+    {
+      "node": "v26.13.0",
+      "platform": "darwin/arm64",
+      "width": 100,
+      "retainedPreviewRows": 5,
+      "results": [
+        {
+          "name": "running-group-200-warm",
+          "iterations": 200,
+          "msPerOperation": 0.002131044999999858,
+          "cpuMsPerOperation": 0.01018
+        },
+        {
+          "name": "append-to-20000-lines",
+          "iterations": 100,
+          "msPerOperation": 0.3823554100000001,
+          "cpuMsPerOperation": 0.45481
+        },
+        {
+          "name": "fabric-20000-lines-first",
+          "iterations": 1,
+          "msPerOperation": 13.312667000000033,
+          "cpuMsPerOperation": 17.912
+        },
+        {
+          "name": "fabric-20000-lines-invalidate",
+          "iterations": 5,
+          "msPerOperation": 0.323433399999999,
+          "cpuMsPerOperation": 0.3798
+        },
+        {
+          "name": "replace-5000-unrelated-words",
+          "iterations": 1,
+          "msPerOperation": 3.637917000000016,
+          "cpuMsPerOperation": 5.304
+        },
+        {
+          "name": "single-diff-98k-ascii",
+          "iterations": 5,
+          "msPerOperation": 0.8789500000000089,
+          "cpuMsPerOperation": 1.3828
+        },
+        {
+          "name": "single-diff-50k-unicode",
+          "iterations": 5,
+          "msPerOperation": 2.337858399999982,
+          "cpuMsPerOperation": 2.6304
+        },
+        {
+          "name": "replace-1500-lines",
+          "iterations": 1,
+          "msPerOperation": 6.817000000000007,
+          "cpuMsPerOperation": 10.906
+        },
+        {
+          "name": "write-50000-lines-argument-stream",
+          "iterations": 100,
+          "msPerOperation": 1.5055908299999998,
+          "cpuMsPerOperation": 1.89853
+        },
+        {
+          "name": "write-60k-diff-invalidate",
+          "iterations": 100,
+          "msPerOperation": 0.14192790999999944,
+          "cpuMsPerOperation": 0.19164
+        },
+        {
+          "name": "edit-50000-lines-argument-stream",
+          "iterations": 100,
+          "msPerOperation": 1.2698054100000002,
+          "cpuMsPerOperation": 1.3602
+        },
+        {
+          "name": "edit-60k-diff-invalidate",
+          "iterations": 100,
+          "msPerOperation": 0.12654999999999972,
+          "cpuMsPerOperation": 0.1561
+        },
+        {
+          "name": "apply_patch-50000-lines-argument-stream",
+          "iterations": 100,
+          "msPerOperation": 1.3823566600000003,
+          "cpuMsPerOperation": 1.6225399999999999
+        },
+        {
+          "name": "apply_patch-60k-diff-invalidate",
+          "iterations": 100,
+          "msPerOperation": 0.11525708000000122,
+          "cpuMsPerOperation": 0.13548
+        }
+      ]
+    }
+  ],
+  "afterRuns": [
+    {
+      "node": "v26.13.0",
+      "platform": "darwin/arm64",
+      "width": 100,
+      "retainedPreviewRows": 5,
+      "results": [
+        {
+          "name": "running-group-200-warm",
+          "iterations": 200,
+          "msPerOperation": 0.002207085000000006,
+          "cpuMsPerOperation": 0.012544999999999999
+        },
+        {
+          "name": "append-to-20000-lines",
+          "iterations": 100,
+          "msPerOperation": 0.3790033400000004,
+          "cpuMsPerOperation": 0.46781999999999996
+        },
+        {
+          "name": "fabric-20000-lines-first",
+          "iterations": 1,
+          "msPerOperation": 13.113291000000004,
+          "cpuMsPerOperation": 17.513
+        },
+        {
+          "name": "fabric-20000-lines-invalidate",
+          "iterations": 5,
+          "msPerOperation": 0.3722831999999926,
+          "cpuMsPerOperation": 0.48339999999999994
+        },
+        {
+          "name": "replace-5000-unrelated-words",
+          "iterations": 1,
+          "msPerOperation": 3.1984579999999596,
+          "cpuMsPerOperation": 4.103
+        },
+        {
+          "name": "single-diff-98k-ascii",
+          "iterations": 5,
+          "msPerOperation": 0.7319750000000113,
+          "cpuMsPerOperation": 1.1688
+        },
+        {
+          "name": "single-diff-50k-unicode",
+          "iterations": 5,
+          "msPerOperation": 2.155758200000014,
+          "cpuMsPerOperation": 2.4344
+        },
+        {
+          "name": "replace-1500-lines",
+          "iterations": 1,
+          "msPerOperation": 6.791917000000012,
+          "cpuMsPerOperation": 10.689
+        },
+        {
+          "name": "write-50000-lines-argument-stream",
+          "iterations": 100,
+          "msPerOperation": 0.018203750000000126,
+          "cpuMsPerOperation": 0.02093
+        },
+        {
+          "name": "write-60k-diff-invalidate",
+          "iterations": 100,
+          "msPerOperation": 0.01862333000000035,
+          "cpuMsPerOperation": 0.05476
+        },
+        {
+          "name": "edit-50000-lines-argument-stream",
+          "iterations": 100,
+          "msPerOperation": 0.01629124999999931,
+          "cpuMsPerOperation": 0.027069999999999997
+        },
+        {
+          "name": "edit-60k-diff-invalidate",
+          "iterations": 100,
+          "msPerOperation": 0.023530419999999594,
+          "cpuMsPerOperation": 0.051050000000000005
+        },
+        {
+          "name": "apply_patch-50000-lines-argument-stream",
+          "iterations": 100,
+          "msPerOperation": 0.10093834000000015,
+          "cpuMsPerOperation": 0.12276
+        },
+        {
+          "name": "apply_patch-60k-diff-invalidate",
+          "iterations": 100,
+          "msPerOperation": 0.0129525000000001,
+          "cpuMsPerOperation": 0.01747
+        }
+      ]
+    },
+    {
+      "node": "v26.13.0",
+      "platform": "darwin/arm64",
+      "width": 100,
+      "retainedPreviewRows": 5,
+      "results": [
+        {
+          "name": "running-group-200-warm",
+          "iterations": 200,
+          "msPerOperation": 0.0025795800000003055,
+          "cpuMsPerOperation": 0.01377
+        },
+        {
+          "name": "append-to-20000-lines",
+          "iterations": 100,
+          "msPerOperation": 0.3799091699999997,
+          "cpuMsPerOperation": 0.46354999999999996
+        },
+        {
+          "name": "fabric-20000-lines-first",
+          "iterations": 1,
+          "msPerOperation": 13.233249999999998,
+          "cpuMsPerOperation": 17.766
+        },
+        {
+          "name": "fabric-20000-lines-invalidate",
+          "iterations": 5,
+          "msPerOperation": 0.35691679999999903,
+          "cpuMsPerOperation": 0.437
+        },
+        {
+          "name": "replace-5000-unrelated-words",
+          "iterations": 1,
+          "msPerOperation": 3.7399580000000014,
+          "cpuMsPerOperation": 4.659
+        },
+        {
+          "name": "single-diff-98k-ascii",
+          "iterations": 5,
+          "msPerOperation": 0.7616250000000037,
+          "cpuMsPerOperation": 1.2226000000000001
+        },
+        {
+          "name": "single-diff-50k-unicode",
+          "iterations": 5,
+          "msPerOperation": 2.206475,
+          "cpuMsPerOperation": 2.5016
+        },
+        {
+          "name": "replace-1500-lines",
+          "iterations": 1,
+          "msPerOperation": 6.9390840000000935,
+          "cpuMsPerOperation": 10.798
+        },
+        {
+          "name": "write-50000-lines-argument-stream",
+          "iterations": 100,
+          "msPerOperation": 0.018450829999999314,
+          "cpuMsPerOperation": 0.02037
+        },
+        {
+          "name": "write-60k-diff-invalidate",
+          "iterations": 100,
+          "msPerOperation": 0.018648339999999736,
+          "cpuMsPerOperation": 0.054560000000000004
+        },
+        {
+          "name": "edit-50000-lines-argument-stream",
+          "iterations": 100,
+          "msPerOperation": 0.016375419999999394,
+          "cpuMsPerOperation": 0.02713
+        },
+        {
+          "name": "edit-60k-diff-invalidate",
+          "iterations": 100,
+          "msPerOperation": 0.02729249999999979,
+          "cpuMsPerOperation": 0.06081
+        },
+        {
+          "name": "apply_patch-50000-lines-argument-stream",
+          "iterations": 100,
+          "msPerOperation": 0.10712458999999967,
+          "cpuMsPerOperation": 0.12441
+        },
+        {
+          "name": "apply_patch-60k-diff-invalidate",
+          "iterations": 100,
+          "msPerOperation": 0.013420419999999923,
+          "cpuMsPerOperation": 0.01843
+        }
+      ]
+    },
+    {
+      "node": "v26.13.0",
+      "platform": "darwin/arm64",
+      "width": 100,
+      "retainedPreviewRows": 5,
+      "results": [
+        {
+          "name": "running-group-200-warm",
+          "iterations": 200,
+          "msPerOperation": 0.0021991650000001074,
+          "cpuMsPerOperation": 0.007435000000000001
+        },
+        {
+          "name": "append-to-20000-lines",
+          "iterations": 100,
+          "msPerOperation": 0.38727042000000095,
+          "cpuMsPerOperation": 0.41918
+        },
+        {
+          "name": "fabric-20000-lines-first",
+          "iterations": 1,
+          "msPerOperation": 13.059624999999983,
+          "cpuMsPerOperation": 17.837
+        },
+        {
+          "name": "fabric-20000-lines-invalidate",
+          "iterations": 5,
+          "msPerOperation": 0.3655749999999898,
+          "cpuMsPerOperation": 0.4284
+        },
+        {
+          "name": "replace-5000-unrelated-words",
+          "iterations": 1,
+          "msPerOperation": 3.8700000000000045,
+          "cpuMsPerOperation": 5.913
+        },
+        {
+          "name": "single-diff-98k-ascii",
+          "iterations": 5,
+          "msPerOperation": 0.8853249999999889,
+          "cpuMsPerOperation": 1.3526
+        },
+        {
+          "name": "single-diff-50k-unicode",
+          "iterations": 5,
+          "msPerOperation": 2.2665332000000036,
+          "cpuMsPerOperation": 2.6
+        },
+        {
+          "name": "replace-1500-lines",
+          "iterations": 1,
+          "msPerOperation": 6.86708299999998,
+          "cpuMsPerOperation": 10.919
+        },
+        {
+          "name": "write-50000-lines-argument-stream",
+          "iterations": 100,
+          "msPerOperation": 0.017239170000000286,
+          "cpuMsPerOperation": 0.019119999999999998
+        },
+        {
+          "name": "write-60k-diff-invalidate",
+          "iterations": 100,
+          "msPerOperation": 0.020186250000000426,
+          "cpuMsPerOperation": 0.05619
+        },
+        {
+          "name": "edit-50000-lines-argument-stream",
+          "iterations": 100,
+          "msPerOperation": 0.016875,
+          "cpuMsPerOperation": 0.02798
+        },
+        {
+          "name": "edit-60k-diff-invalidate",
+          "iterations": 100,
+          "msPerOperation": 0.02529875000000061,
+          "cpuMsPerOperation": 0.036019999999999996
+        },
+        {
+          "name": "apply_patch-50000-lines-argument-stream",
+          "iterations": 100,
+          "msPerOperation": 0.09120374999999967,
+          "cpuMsPerOperation": 0.10775
+        },
+        {
+          "name": "apply_patch-60k-diff-invalidate",
+          "iterations": 100,
+          "msPerOperation": 0.012782910000000812,
+          "cpuMsPerOperation": 0.017410000000000002
+        }
+      ]
+    }
+  ]
+}
