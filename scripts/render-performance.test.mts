@@ -94,6 +94,7 @@ test("thinking still merges when a stream ends or a separator is removed", () =>
 	chat.addChild(new AssistantMessageComponent(message() as any, true));
 	chat.render(100);
 	chat.removeChild(separator);
+	chat.addChild(new UserMessageComponent("A later message."));
 	assert.match(plain(chat.render(100)), /Thought for 3s/);
 });
 
