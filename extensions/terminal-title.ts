@@ -3,15 +3,17 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Lexer, type Token, type Tokens } from "marked";
 
 const TITLE_ENTRY_TYPE = "pi-claude-code-ui-terminal-title";
+const COMPLETION_GUIDELINE = "After your final reply, leave a blank line and append an HTML comment on its own line: <!-- pi-terminal-title: Short task summary -->. Summarize the task's action and subject in the user's language in at most 50 characters of plain text. Omit status labels, Markdown and trailing punctuation.";
+const COMPLETION_LABEL_LIMIT = 62;
 
-function titleText(value: unknown): string {
+function titleText(value: unknown, limit = 120): string {
 	if (typeof value !== "string") return "";
 	const text = stripVTControlCharacters(value)
 		.replace(/[\x00-\x1f\x7f-\x9f]/g, " ")
 		.replace(/\s+/g, " ")
 		.trim();
 	const chars = Array.from(text);
-	return chars.length > 120 ? `${chars.slice(0, 119).join("").trimEnd()}…` : text;
+	return chars.length > limit ? `${chars.slice(0, limit - 1).join("").trimEnd()}…` : text;
 }
 
 function markdownText(tokens: Token[]): string {
@@ -28,6 +30,22 @@ function markdownText(tokens: Token[]): string {
 	}).join("");
 }
 
+function firstLine(tokens: Token[]): string | undefined {
+	return markdownText(tokens).split(/\r?\n/).find((line) => line.trim());
+}
+
+function notifyCompletion(title: string, ctx: ExtensionContext): void {
+	try {
+		if (process.stdout.isTTY && process.env.KITTY_WINDOW_ID) {
+			process.stdout.write(`\x1b]99;;${title}\x1b\\`);
+		} else if (process.stdout.isTTY && /^(ghostty|iTerm\.app|WezTerm)$/i.test(process.env.TERM_PROGRAM ?? "")) {
+			process.stdout.write(`\x1b]777;notify;Pi;${title.replaceAll(";", ",")}\x07`);
+		} else {
+			ctx.ui.notify(title, "info");
+		}
+	} catch { /* A closed terminal must not fail execution. */ }
+}
+
 export function installTerminalTitle(
 	pi: ExtensionAPI,
 	describeActivity: (name: string, args: any) => string,
@@ -35,12 +53,17 @@ export function installTerminalTitle(
 ): void {
 	let title = "";
 	let completionTitle = "";
+	let taskSummary = "";
 	let pendingWrite: ReturnType<typeof setImmediate> | undefined;
 	const namedExecutions = new Set<string>();
 
+	function active(ctx: ExtensionContext): boolean {
+		return ctx.mode === "tui" && ctx.hasUI && isEnabled();
+	}
+
 	function write(ctx: ExtensionContext): void {
 		try {
-			if (title && ctx.mode === "tui" && ctx.hasUI && isEnabled()) ctx.ui.setTitle(title);
+			if (title && active(ctx)) ctx.ui.setTitle(title);
 		} catch { /* A closed terminal must not fail execution. */ }
 	}
 
@@ -66,6 +89,7 @@ export function installTerminalTitle(
 	function resume(event: unknown, ctx: ExtensionContext): void {
 		title = "";
 		completionTitle = "";
+		taskSummary = "";
 		namedExecutions.clear();
 		try {
 			const branch = ctx.sessionManager.getBranch();
@@ -80,7 +104,7 @@ export function installTerminalTitle(
 	}
 
 	pi.on("tool_execution_start", (event, ctx) => {
-		if (ctx.mode !== "tui" || !ctx.hasUI || !isEnabled()) return;
+		if (!active(ctx)) return;
 		const parent = (event as typeof event & { parentToolCallId?: string }).parentToolCallId;
 		if (parent && namedExecutions.has(parent)) {
 			namedExecutions.add(event.toolCallId);
@@ -93,26 +117,38 @@ export function installTerminalTitle(
 	pi.on("tool_execution_end", (event) => {
 		namedExecutions.delete(event.toolCallId);
 	});
+	pi.on("before_agent_start", (event, ctx) => {
+		taskSummary = "";
+		if (active(ctx)) event.systemPromptOptions?.promptGuidelines?.push(COMPLETION_GUIDELINE);
+	});
 	pi.on("agent_start", () => {
 		completionTitle = "";
 	});
-	pi.on("agent_end", (event) => {
+	pi.on("agent_end", (event, ctx) => {
 		completionTitle = "";
-		for (let i = (event.messages?.length ?? 0) - 1; i >= 0; i--) {
-			const message = event.messages[i];
-			if (message.role !== "assistant") continue;
-			if (message.stopReason === "stop") {
-				const text = message.content
-					.filter((block) => block.type === "text")
-					.map((block) => block.text)
-					.join("\n");
-				const summary = markdownText(Lexer.lex(text))
-					.split(/\r?\n/)
-					.find((line) => line.trim());
-				completionTitle = titleText(`✓ ${summary?.trim() || "Completed"}`);
-			}
-			break;
+		if (!active(ctx)) return;
+
+		const messages = (event.messages ?? []).slice().reverse();
+		const user = messages.find((message) => message.role === "user");
+		if (user) {
+			const text = typeof user.content === "string" ? user.content : user.content
+				.filter((block) => block.type === "text")
+				.map((block) => block.text)
+				.join("\n");
+			taskSummary = titleText(firstLine(Lexer.lex(text)), COMPLETION_LABEL_LIMIT);
 		}
+
+		const assistant = messages.find((message) => message.role === "assistant");
+		if (assistant?.stopReason !== "stop") return;
+		const text = assistant.content
+			.filter((block) => block.type === "text")
+			.map((block) => block.text)
+			.join("\n");
+		const tokens = Lexer.lex(text.trimEnd());
+		const last = tokens.at(-1);
+		const summary = last?.type === "html" ? /^<!-- pi-terminal-title: ([^\r\n]+?) -->$/.exec(last.raw)?.[1] : undefined;
+		const label = titleText(summary, COMPLETION_LABEL_LIMIT) || taskSummary || titleText(firstLine(tokens), COMPLETION_LABEL_LIMIT);
+		completionTitle = `✓ ${label || "Completed"}`;
 	});
 	pi.on("session_start", resume);
 	pi.on("session_tree", resume);
@@ -122,10 +158,12 @@ export function installTerminalTitle(
 	};
 	lifecycle.on("session_info_changed", reassert);
 	lifecycle.on("agent_settled", (event, ctx) => {
-		if (!event.aborted && completionTitle && ctx.mode === "tui" && ctx.hasUI && isEnabled()) {
+		if (!event.aborted && completionTitle && active(ctx)) {
 			update(completionTitle, ctx);
+			notifyCompletion(completionTitle, ctx);
 		}
 		completionTitle = "";
+		taskSummary = "";
 		reassert(event, ctx);
 	});
 	pi.on("session_shutdown", () => {
@@ -133,6 +171,7 @@ export function installTerminalTitle(
 		pendingWrite = undefined;
 		title = "";
 		completionTitle = "";
+		taskSummary = "";
 		namedExecutions.clear();
 	});
 }

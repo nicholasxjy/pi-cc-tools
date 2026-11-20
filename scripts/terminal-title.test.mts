@@ -38,6 +38,7 @@ test.beforeEach((t) => {
 function harness(t: test.TestContext, mode = "tui", hasUI = true) {
 	const handlers = new Map<string, Array<(event: any, ctx: any) => unknown>>();
 	const titles: string[] = [];
+	const notifications: string[] = [];
 	const saved: any[] = [];
 	let branch: any[] = [];
 	const ctx = {
@@ -46,6 +47,7 @@ function harness(t: test.TestContext, mode = "tui", hasUI = true) {
 		sessionManager: { getBranch: () => branch },
 		ui: {
 			setTitle: (title: string) => { titles.push(title); },
+			notify: (message: string) => { notifications.push(message); },
 			setWorkingMessage() {},
 		},
 	};
@@ -66,7 +68,7 @@ function harness(t: test.TestContext, mode = "tui", hasUI = true) {
 		await fire("tool_execution_start", { toolName, args, toolCallId, parentToolCallId });
 	}
 	t.after(() => fire("session_shutdown"));
-	return { ctx, pi, titles, saved, fire, start, setBranch: (entries: any[]) => { branch = entries; } };
+	return { ctx, pi, titles, notifications, saved, fire, start, setBranch: (entries: any[]) => { branch = entries; } };
 }
 
 test("the spinner writes tool activities and keeps the last step without a final response", async (t) => {
@@ -89,26 +91,88 @@ test("the spinner writes tool activities and keeps the last step without a final
 	assert.equal(h.saved.length, 5, "only a changed step creates a session entry");
 });
 
-test("completed tasks replace the last activity with the final response summary", async (t) => {
+test("settled tasks show and notify with the short task summary", async (t) => {
 	const h = harness(t);
+	const promptGuidelines = ["Existing guideline"];
+	await h.fire("before_agent_start", { systemPromptOptions: { promptGuidelines } });
+	assert.equal(promptGuidelines[0], "Existing guideline");
+	assert.match(promptGuidelines[1], /<!-- pi-terminal-title:/);
 	await h.start("bash", { command: "npm test", displaySummary: "验证修复" });
 	await h.fire("agent_end", { messages: [{
 		role: "assistant",
-		content: [{ type: "text", text: "已修复标题完成提醒。\n\n相关测试全部通过。" }],
+		content: [{ type: "text", text: "**Result**\n\n相关测试全部通过。\n\n<!-- pi-terminal-title: 优化终端完成标题 -->\n" }],
 		stopReason: "stop",
 	}] });
+	assert.deepEqual(h.notifications, []);
+	await h.fire("agent_settled");
 	await h.fire("agent_settled");
 	h.ctx.ui.setTitle("Pi's default title");
 	await tick();
-	assert.equal(h.titles.at(-1), "✓ 已修复标题完成提醒。");
-	assert.equal(h.saved.at(-1).data.title, "✓ 已修复标题完成提醒。");
+	const title = "✓ 优化终端完成标题";
+	assert.equal(h.titles.at(-1), title);
+	assert.deepEqual(h.notifications, [title]);
+	assert.equal(h.saved.at(-1).data.title, title);
 	const resumed = harness(t);
 	resumed.setBranch([...h.saved]);
 	await resumed.fire("session_start", { reason: "reload" });
 	await tick();
-	assert.equal(resumed.titles.at(-1), "✓ 已修复标题完成提醒。");
+	assert.equal(resumed.titles.at(-1), title);
+	assert.deepEqual(resumed.notifications, []);
 	await resumed.start("read", { path: "next.ts" });
 	assert.equal(resumed.titles.at(-1), "Reading next.ts");
+});
+
+test("native terminal notifications carry the sanitized task summary", async (t) => {
+	const tty = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+	const termProgram = process.env.TERM_PROGRAM;
+	const kittyWindow = process.env.KITTY_WINDOW_ID;
+	t.after(() => {
+		if (tty) Object.defineProperty(process.stdout, "isTTY", tty);
+		else Reflect.deleteProperty(process.stdout, "isTTY");
+		if (termProgram === undefined) delete process.env.TERM_PROGRAM;
+		else process.env.TERM_PROGRAM = termProgram;
+		if (kittyWindow === undefined) delete process.env.KITTY_WINDOW_ID;
+		else process.env.KITTY_WINDOW_ID = kittyWindow;
+	});
+	Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
+	const output: string[] = [];
+	const originalWrite = process.stdout.write.bind(process.stdout);
+	t.mock.method(process.stdout, "write", (chunk: string | Uint8Array, ...args: any[]) => {
+		if (typeof chunk !== "string" || !chunk.startsWith("\x1b]")) return originalWrite(chunk, ...args);
+		output.push(chunk);
+		return true;
+	});
+	process.env.TERM_PROGRAM = "ghostty";
+	delete process.env.KITTY_WINDOW_ID;
+	const h = harness(t);
+	const event = { messages: [{
+		role: "assistant", stopReason: "stop",
+		content: [{ type: "text", text: "**Result**\n\n<!-- pi-terminal-title: \x1b[31m修复标题; 验证通知\x1b[0m -->" }],
+	}] };
+	await h.fire("agent_end", event);
+	await h.fire("agent_settled");
+	process.env.KITTY_WINDOW_ID = "1";
+	await h.fire("agent_end", event);
+	await h.fire("agent_settled");
+	assert.deepEqual(output, ["\x1b]777;notify;Pi;✓ 修复标题, 验证通知\x07", "\x1b]99;;✓ 修复标题; 验证通知\x1b\\"]);
+	assert.deepEqual(h.notifications, []);
+});
+
+test("the latest user request is the fallback across retries without a summary", async (t) => {
+	const h = harness(t);
+	await h.fire("agent_end", { messages: [
+		{ role: "user", content: "Previous request" },
+		{ role: "user", content: [{ type: "image" }, { type: "text", text: "修复 **终端通知**\n\n请运行测试。" }] },
+		{ role: "assistant", content: [], stopReason: "error" },
+	] });
+	await h.fire("agent_start");
+	await h.fire("agent_end", { messages: [{
+		role: "assistant", stopReason: "stop",
+		content: [{ type: "text", text: "**Result**\n\n~~~html\n<!-- pi-terminal-title: Example only -->\n~~~" }],
+	}] });
+	await h.fire("agent_settled");
+	assert.equal(h.titles.at(-1), "✓ 修复 终端通知");
+	assert.deepEqual(h.notifications, ["✓ 修复 终端通知"]);
 });
 
 test("responses without tools produce safe, bounded completion titles", async (t) => {
@@ -116,7 +180,7 @@ test("responses without tools produce safe, bounded completion titles", async (t
 		["\n  Answer ready.\r\n\nMore details.", "✓ Answer ready."],
 		["", "✓ Completed"],
 		["\x1b[31m已完成\x1b[0m\x07\x9c", "✓ 已完成"],
-		["🚀".repeat(121), `✓ ${"🚀".repeat(117)}…`],
+		["🚀".repeat(121), `✓ ${"🚀".repeat(61)}…`],
 	]) {
 		const h = harness(t);
 		await h.fire("agent_end", { messages: [{
@@ -144,7 +208,7 @@ test("completion titles show Markdown as plain text and survive reload", async (
 		["**已完成**  \n下一行", "✓ 已完成"],
 		["`a < b && c > d`", "✓ a < b && c > d"],
 		["---\n\n<!-- done -->", "✓ Completed"],
-		[`**${"🚀".repeat(121)}**`, `✓ ${"🚀".repeat(117)}…`],
+		[`**${"🚀".repeat(121)}**`, `✓ ${"🚀".repeat(61)}…`],
 	]) {
 		const h = harness(t);
 		await h.fire("agent_end", { messages: [{
@@ -194,6 +258,7 @@ test("failed, aborted and unfinished runs do not reuse an earlier completion", a
 		await tick();
 		assert.equal(h.titles.at(-1), "Running checks", String(stopReason));
 		assert.equal(h.saved.length, 1);
+		assert.deepEqual(h.notifications, []);
 	}
 });
 
@@ -214,6 +279,9 @@ test("terminalTitle accepts booleans from project and agent settings", async (t)
 test("disabled terminalTitle suppresses tool, resume, tree and lifecycle writes", async (t) => {
 	configure({ terminalTitle: false });
 	const h = harness(t);
+	const promptGuidelines: string[] = [];
+	await h.fire("before_agent_start", { systemPromptOptions: { promptGuidelines } });
+	assert.deepEqual(promptGuidelines, []);
 	h.setBranch([entry("Saved step")]);
 	for (const event of ["session_start", "session_tree", "session_info_changed", "agent_settled"]) {
 		await h.fire(event);
@@ -226,6 +294,7 @@ test("disabled terminalTitle suppresses tool, resume, tree and lifecycle writes"
 	await tick();
 	assert.deepEqual(h.titles, []);
 	assert.deepEqual(h.saved, []);
+	assert.deepEqual(h.notifications, []);
 });
 
 test("disabling terminalTitle suppresses already scheduled writes", async (t) => {
@@ -326,6 +395,7 @@ test("RPC, print, JSON and contexts without UI do not write or record titles", a
 		await tick();
 		assert.deepEqual(h.titles, [], mode);
 		assert.deepEqual(h.saved, [], mode);
+		assert.deepEqual(h.notifications, [], mode);
 	}
 });
 
