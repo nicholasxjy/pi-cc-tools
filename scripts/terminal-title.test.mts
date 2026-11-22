@@ -41,7 +41,7 @@ function harness(t: test.TestContext, mode = "tui", hasUI = true) {
 	const notifications: string[] = [];
 	const saved: any[] = [];
 	let branch: any[] = [];
-	const ctx = {
+	const ctx: any = {
 		mode,
 		hasUI,
 		sessionManager: { getBranch: () => branch },
@@ -67,8 +67,26 @@ function harness(t: test.TestContext, mode = "tui", hasUI = true) {
 	async function start(toolName: string, args: any, toolCallId = "call", parentToolCallId?: string) {
 		await fire("tool_execution_start", { toolName, args, toolCallId, parentToolCallId });
 	}
+	async function userPrompt(text = "", source: "interactive" | "rpc" = "interactive") {
+		await fire("input", { text, source });
+		await fire("before_agent_start", { messageType: "user", prompt: text });
+	}
+	function mockModel(
+		responder: (model: any, context: any, options: any) => unknown,
+		model: any = { id: "summary-model", provider: "test" },
+	) {
+		const calls: Array<{ model: any; context: any; options: any }> = [];
+		ctx.model = model;
+		ctx.modelRegistry = {
+			streamSimple(m: any, context: any, options: any) {
+				calls.push({ model: m, context, options });
+				return { result: () => Promise.resolve().then(() => responder(m, context, options)) };
+			},
+		};
+		return calls;
+	}
 	t.after(() => fire("session_shutdown"));
-	return { ctx, pi, titles, notifications, saved, fire, start, setBranch: (entries: any[]) => { branch = entries; } };
+	return { ctx, pi, titles, notifications, saved, fire, start, userPrompt, mockModel, setBranch: (entries: any[]) => { branch = entries; } };
 }
 
 test("the spinner writes tool activities and keeps the last step without a final response", async (t) => {
@@ -91,18 +109,19 @@ test("the spinner writes tool activities and keeps the last step without a final
 	assert.equal(h.saved.length, 5, "only a changed step creates a session entry");
 });
 
-test("settled tasks show and notify with the short task summary", async (t) => {
+test("settled tasks show and notify with a fallback title without changing the main prompt", async (t) => {
 	const h = harness(t);
+	const prompt = "优化**终端完成标题**\n\n相关要求。";
 	const promptGuidelines = ["Existing guideline"];
-	await h.fire("before_agent_start", { systemPromptOptions: { promptGuidelines } });
-	assert.equal(promptGuidelines[0], "Existing guideline");
-	assert.match(promptGuidelines[1], /<!-- pi-terminal-title:/);
+	await h.fire("input", { text: prompt, source: "interactive" });
+	await h.fire("before_agent_start", { messageType: "user", prompt, systemPromptOptions: { promptGuidelines } });
+	assert.deepEqual(promptGuidelines, ["Existing guideline"]);
 	await h.start("bash", { command: "npm test", displaySummary: "验证修复" });
-	await h.fire("agent_end", { messages: [{
-		role: "assistant",
-		content: [{ type: "text", text: "**Result**\n\n相关测试全部通过。\n\n<!-- pi-terminal-title: 优化终端完成标题 -->\n" }],
-		stopReason: "stop",
-	}] });
+	await h.fire("agent_end", { messages: [
+		{ role: "user", content: "Previous request" },
+		{ role: "user", content: "优化**终端完成标题**\n\n相关要求。" },
+		{ role: "assistant", content: [{ type: "text", text: "**Result**\n\n相关测试全部通过。" }], stopReason: "stop" },
+	] });
 	assert.deepEqual(h.notifications, []);
 	await h.fire("agent_settled");
 	await h.fire("agent_settled");
@@ -147,19 +166,24 @@ test("native terminal notifications carry the sanitized task summary", async (t)
 	const h = harness(t);
 	const event = { messages: [{
 		role: "assistant", stopReason: "stop",
-		content: [{ type: "text", text: "**Result**\n\n<!-- pi-terminal-title: \x1b[31m修复标题; 验证通知\x1b[0m -->" }],
+		content: [{ type: "text", text: "**\x1b[31m修复标题; 验证通知\x1b[0m**\n\n更多说明。" }],
 	}] };
+	await h.userPrompt("");
 	await h.fire("agent_end", event);
 	await h.fire("agent_settled");
+	await tick();
 	process.env.KITTY_WINDOW_ID = "1";
+	await h.userPrompt("");
 	await h.fire("agent_end", event);
 	await h.fire("agent_settled");
+	await tick();
 	assert.deepEqual(output, ["\x1b]777;notify;Pi;✓ 修复标题, 验证通知\x07", "\x1b]99;;✓ 修复标题; 验证通知\x1b\\"]);
 	assert.deepEqual(h.notifications, []);
 });
 
-test("the latest user request is the fallback across retries without a summary", async (t) => {
+test("the latest user request is kept across retries", async (t) => {
 	const h = harness(t);
+	await h.userPrompt("修复 **终端通知**\n\n请运行测试。");
 	await h.fire("agent_end", { messages: [
 		{ role: "user", content: "Previous request" },
 		{ role: "user", content: [{ type: "image" }, { type: "text", text: "修复 **终端通知**\n\n请运行测试。" }] },
@@ -168,9 +192,10 @@ test("the latest user request is the fallback across retries without a summary",
 	await h.fire("agent_start");
 	await h.fire("agent_end", { messages: [{
 		role: "assistant", stopReason: "stop",
-		content: [{ type: "text", text: "**Result**\n\n~~~html\n<!-- pi-terminal-title: Example only -->\n~~~" }],
+		content: [{ type: "text", text: "已通过重试。" }],
 	}] });
 	await h.fire("agent_settled");
+	await tick();
 	assert.equal(h.titles.at(-1), "✓ 修复 终端通知");
 	assert.deepEqual(h.notifications, ["✓ 修复 终端通知"]);
 });
@@ -183,6 +208,7 @@ test("responses without tools produce safe, bounded completion titles", async (t
 		["🚀".repeat(121), `✓ ${"🚀".repeat(61)}…`],
 	]) {
 		const h = harness(t);
+		await h.userPrompt("");
 		await h.fire("agent_end", { messages: [{
 			role: "assistant",
 			content: [{ type: "thinking", thinking: "Private reasoning" }, { type: "text", text }],
@@ -208,9 +234,11 @@ test("completion titles show Markdown as plain text and survive reload", async (
 		["**已完成**  \n下一行", "✓ 已完成"],
 		["`a < b && c > d`", "✓ a < b && c > d"],
 		["---\n\n<!-- done -->", "✓ Completed"],
+		["已完成\n\n<!-- pi-terminal-title: 旧标题 -->", "✓ 已完成"],
 		[`**${"🚀".repeat(121)}**`, `✓ ${"🚀".repeat(61)}…`],
 	]) {
 		const h = harness(t);
+		await h.userPrompt("");
 		await h.fire("agent_end", { messages: [{
 			role: "assistant", content: [{ type: "text", text }], stopReason: "stop",
 		}] });
@@ -228,6 +256,7 @@ test("completion titles show Markdown as plain text and survive reload", async (
 
 test("completion waits for settlement and uses the latest run's response", async (t) => {
 	const h = harness(t);
+	await h.userPrompt("");
 	await h.start("bash", { displaySummary: "Running checks" });
 	for (const text of ["Intermediate result", "Final result"]) {
 		await h.fire("agent_start");
@@ -246,6 +275,7 @@ test("completion waits for settlement and uses the latest run's response", async
 test("failed, aborted and unfinished runs do not reuse an earlier completion", async (t) => {
 	for (const stopReason of ["error", "aborted", "length", "toolUse", "stop", undefined]) {
 		const h = harness(t);
+		await h.userPrompt("");
 		await h.start("bash", { displaySummary: "Running checks" });
 		await h.fire("agent_end", { messages: [{
 			role: "assistant", content: [{ type: "text", text: "Earlier result" }], stopReason: "stop",
@@ -279,9 +309,6 @@ test("terminalTitle accepts booleans from project and agent settings", async (t)
 test("disabled terminalTitle suppresses tool, resume, tree and lifecycle writes", async (t) => {
 	configure({ terminalTitle: false });
 	const h = harness(t);
-	const promptGuidelines: string[] = [];
-	await h.fire("before_agent_start", { systemPromptOptions: { promptGuidelines } });
-	assert.deepEqual(promptGuidelines, []);
 	h.setBranch([entry("Saved step")]);
 	for (const event of ["session_start", "session_tree", "session_info_changed", "agent_settled"]) {
 		await h.fire(event);
@@ -387,12 +414,15 @@ test("shutdown cancels pending title writes", async (t) => {
 test("RPC, print, JSON and contexts without UI do not write or record titles", async (t) => {
 	for (const [mode, hasUI] of [["rpc", true], ["print", false], ["json", false], ["tui", false]] as const) {
 		const h = harness(t, mode, hasUI);
+		const calls = h.mockModel(() => ({ stopReason: "stop", content: [{ type: "text", text: "Summary" }] }));
 		h.setBranch([entry("Saved step")]);
 		await h.fire("session_start");
+		await h.userPrompt("Run checks", mode === "rpc" ? "rpc" : "interactive");
 		await h.start("bash", { command: "npm test", displaySummary: "Verify tests" });
 		await h.fire("agent_end", { messages: [{ role: "assistant", content: [], stopReason: "stop" }] });
 		await h.fire("agent_settled", { aborted: false });
 		await tick();
+		assert.deepEqual(calls, [], mode);
 		assert.deepEqual(h.titles, [], mode);
 		assert.deepEqual(h.saved, [], mode);
 		assert.deepEqual(h.notifications, [], mode);
@@ -421,4 +451,217 @@ test("title output or persistence failures do not interrupt execution", async (t
 	h.ctx.sessionManager.getBranch = () => { throw new Error("unavailable session"); };
 	await h.fire("session_start");
 	await tick();
+});
+
+test("settled genuine tasks summarize asynchronously once after retries and continuations", async (t) => {
+	for (const source of ["interactive", "rpc"] as const) {
+		const h = harness(t);
+		let resolveSummary!: (value: any) => void;
+		const calls = h.mockModel(() => new Promise((resolve) => { resolveSummary = resolve; }));
+		await h.userPrompt("Check why **tests** failed\n\nand fix them", source);
+		await h.start("bash", { displaySummary: "Running tests" });
+		await h.fire("agent_start");
+		await h.fire("agent_end", { messages: [{ role: "assistant", content: [], stopReason: "error" }] });
+		await h.fire("agent_start");
+		await h.fire("agent_end", { messages: [
+			{ role: "assistant", stopReason: "toolUse", content: [{ type: "text", text: "Checking logs" }] },
+			{ role: "assistant", stopReason: "stop", content: [
+				{ type: "thinking", thinking: "Internal" },
+				{ type: "text", text: "Fixed the auth test." },
+			] },
+		] });
+		assert.equal(calls.length, 0, "summary starts only on settlement");
+		await h.fire("agent_settled", { aborted: false });
+		await h.fire("agent_settled", { aborted: false });
+		assert.equal(calls.length, 1, "settled retries emit one summary request");
+		assert.deepEqual(h.notifications, []);
+		assert.equal(h.titles.at(-1), "Running tests");
+
+		const [{ model, context, options }] = calls;
+		assert.equal(model, h.ctx.model);
+		assert.equal(typeof context.systemPrompt, "string");
+		assert.ok(context.systemPrompt.length > 0);
+		assert.equal(context.messages.length, 1);
+		assert.equal(context.messages[0].role, "user");
+		assert.equal(typeof context.messages[0].timestamp, "number");
+		assert.deepEqual(JSON.parse(context.messages[0].content), {
+			request: "Check why **tests** failed\n\nand fix them",
+			reply: "Fixed the auth test.",
+		});
+		assert.equal(typeof options.maxTokens, "number");
+		assert.ok(options.maxTokens > 0);
+		assert.equal(options.cacheRetention, "none");
+		assert.ok(options.signal instanceof AbortSignal);
+
+		resolveSummary({
+			stopReason: "stop",
+			content: [{ type: "thinking", thinking: "Draft" }, { type: "text", text: "**Fixed** auth tests" }],
+		});
+		await tick();
+		assert.equal(h.titles.at(-1), "✓ Fixed auth tests", source);
+		assert.deepEqual(h.notifications, ["✓ Fixed auth tests"], source);
+		assert.equal(h.saved.at(-1).data.title, "✓ Fixed auth tests", source);
+	}
+});
+
+test("extension triggers and sendUserMessage do not summarize or set completion titles", async (t) => {
+	const h = harness(t);
+	const calls = h.mockModel(() => ({ stopReason: "stop", content: [{ type: "text", text: "Should not run" }] }));
+	await h.start("read", { path: "app.ts" });
+
+	// 1. Idle custom plugin trigger without an input event.
+	await h.fire("before_agent_start", { messageType: "custom", prompt: "Scheduled check" });
+	await h.fire("agent_start");
+	await h.fire("agent_end", { messages: [{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Done" }] }] });
+	await h.fire("agent_settled", { aborted: false });
+	await tick();
+
+	// 2. Plugin sendUserMessage fires input with source: "extension" before messageType: "user".
+	await h.fire("input", { text: "Automated prompt", source: "extension" });
+	await h.fire("before_agent_start", { messageType: "user", prompt: "Automated prompt" });
+	await h.fire("agent_start");
+	await h.fire("agent_end", { messages: [{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Done" }] }] });
+	await h.fire("agent_settled", { aborted: false });
+	await tick();
+
+	// 3. Handled interactive input that never starts a user turn does not taint a later custom trigger.
+	await h.fire("input", { text: "Handled locally", source: "interactive" });
+	await h.fire("before_agent_start", { messageType: "custom", prompt: "Custom follow-on" });
+	await h.fire("agent_start");
+	await h.fire("agent_end", { messages: [{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Done" }] }] });
+	await h.fire("agent_settled", { aborted: false });
+	await tick();
+
+	assert.deepEqual(calls, []);
+	assert.equal(h.titles.at(-1), "Reading app.ts");
+	assert.equal(h.titles.every((title) => title === "Reading app.ts"), true);
+	assert.equal(h.saved.length, 1);
+	assert.deepEqual(h.notifications, []);
+});
+
+test("human queued steer and followUp update active prompt while extension queues do not", async (t) => {
+	for (const behavior of ["steer", "followUp"] as const) {
+		const h = harness(t);
+		const calls = h.mockModel(() => ({ stopReason: "stop", content: [{ type: "text", text: "Updated summary" }] }));
+		await h.userPrompt("Initial request");
+		await h.fire("agent_start");
+		await h.fire("input", { text: "Extension noise", source: "extension", streamingBehavior: behavior });
+		await h.fire("input", { text: `Human ${behavior}`, source: behavior === "steer" ? "interactive" : "rpc", streamingBehavior: behavior });
+		await h.fire("input", { text: "More extension noise", source: "extension", streamingBehavior: behavior });
+		await h.fire("agent_end", { messages: [{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Done" }] }] });
+		await h.fire("agent_settled", { aborted: false });
+		await tick();
+		assert.equal(calls.length, 1);
+		assert.equal(JSON.parse(calls[0].context.messages[0].content).request, `Human ${behavior}`);
+		assert.equal(h.titles.at(-1), "✓ Updated summary");
+	}
+
+	// Fallback path also preserves the original user input over extension queued prompts.
+	const h = harness(t);
+	await h.userPrompt("Keep user prompt");
+	await h.fire("agent_start");
+	await h.fire("input", { text: "Extension steer", source: "extension", streamingBehavior: "steer" });
+	await h.fire("input", { text: "Extension followUp", source: "extension", streamingBehavior: "followUp" });
+	await h.fire("agent_end", { messages: [{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Reply" }] }] });
+	await h.fire("agent_settled", { aborted: false });
+	await tick();
+	assert.equal(h.titles.at(-1), "✓ Keep user prompt");
+});
+
+test("missing model or API, summary errors, and empty output fall back in order", async (t) => {
+	// Missing model / missing streamSimple API
+	for (const setup of [
+		(h: ReturnType<typeof harness>) => { h.ctx.modelRegistry = { streamSimple() { throw new Error("should not call"); } }; },
+		(h: ReturnType<typeof harness>) => { h.ctx.model = { id: "m" }; },
+	]) {
+		const h = harness(t);
+		setup(h);
+		await h.userPrompt("**User fallback**\nMore lines");
+		await h.fire("agent_end", { messages: [{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Reply" }] }] });
+		await h.fire("agent_settled", { aborted: false });
+		await tick();
+		assert.equal(h.titles.at(-1), "✓ User fallback");
+	}
+
+	// Summary error, rejected promise, non-stop stopReason, and empty output all fall back: input -> reply -> Completed
+	const failureModes: Array<(h: ReturnType<typeof harness>) => void> = [
+		(h) => {
+			h.ctx.model = { id: "m" };
+			h.ctx.modelRegistry = { streamSimple() { throw new Error("sync failure"); } };
+		},
+		(h) => { h.mockModel(() => Promise.reject(new Error("async failure"))); },
+		(h) => { h.mockModel(() => ({ stopReason: "error", content: [{ type: "text", text: "Ignored error text" }] })); },
+		(h) => { h.mockModel(() => ({ stopReason: "stop", content: [{ type: "text", text: "   \n<!-- empty -->" }] })); },
+	];
+	for (const setup of failureModes) {
+		for (const [input, reply, expected] of [
+			["**Input first**\nSecond", "**Reply second**", "✓ Input first"],
+			["   \n<!-- blank -->", "**Reply second**", "✓ Reply second"],
+			["", "", "✓ Completed"],
+		]) {
+			const h = harness(t);
+			setup(h);
+			await h.userPrompt(input);
+			await h.fire("agent_end", { messages: [{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: reply }] }] });
+			await h.fire("agent_settled", { aborted: false });
+			await tick();
+			assert.equal(h.titles.at(-1), expected);
+			assert.deepEqual(h.notifications, [expected]);
+		}
+	}
+});
+
+test("new run and shutdown invalidate in-flight summaries", async (t) => {
+	// New run cancels and ignores stale summary from previous run.
+	{
+		const h = harness(t);
+		let resolveFirst!: (value: any) => void;
+		let callIndex = 0;
+		const calls = h.mockModel(() => {
+			callIndex++;
+			if (callIndex === 1) return new Promise((resolve) => { resolveFirst = resolve; });
+			return { stopReason: "stop", content: [{ type: "text", text: "Second summary" }] };
+		});
+		await h.userPrompt("First task");
+		await h.fire("agent_end", { messages: [{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "First reply" }] }] });
+		await h.fire("agent_settled", { aborted: false });
+		assert.equal(calls.length, 1);
+
+		await h.userPrompt("Second task");
+		await h.fire("agent_start");
+		await h.start("read", { path: "next.ts" });
+		assert.equal(calls[0].options.signal.aborted, true);
+
+		resolveFirst({ stopReason: "stop", content: [{ type: "text", text: "Stale summary" }] });
+		await tick();
+		assert.equal(h.titles.at(-1), "Reading next.ts");
+		assert.deepEqual(h.notifications, []);
+		assert.equal(h.saved.some((s) => s.data.title === "✓ Stale summary"), false);
+
+		await h.fire("agent_end", { messages: [{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Second reply" }] }] });
+		await h.fire("agent_settled", { aborted: false });
+		await tick();
+		assert.equal(h.titles.at(-1), "✓ Second summary");
+		assert.deepEqual(h.notifications, ["✓ Second summary"]);
+	}
+
+	// Shutdown cancels and ignores in-flight summary.
+	{
+		const h = harness(t);
+		let resolvePending!: (value: any) => void;
+		const calls = h.mockModel(() => new Promise((resolve) => { resolvePending = resolve; }));
+		await h.userPrompt("Task before shutdown");
+		await h.fire("agent_end", { messages: [{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Done" }] }] });
+		await h.fire("agent_settled", { aborted: false });
+		assert.equal(calls.length, 1);
+
+		await h.fire("session_shutdown");
+		assert.equal(calls[0].options.signal.aborted, true);
+
+		resolvePending({ stopReason: "stop", content: [{ type: "text", text: "Late summary" }] });
+		await tick();
+		assert.deepEqual(h.titles, []);
+		assert.deepEqual(h.saved, []);
+		assert.deepEqual(h.notifications, []);
+	}
 });
