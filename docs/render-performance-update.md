@@ -19,7 +19,7 @@
 | apply_patch：50,000 行参数流更新 | 1.382 ms | 0.101 ms | 92.7% |
 | apply_patch：60 KB diff 失效重绘 | 0.115 ms | 0.013 ms | 88.8% |
 
-这些是组件处理和布局耗时，不能换算为整个程序的帧率或真实终端吞吐。原有基准场景及全部六轮的 wall time、CPU 时间保存在 [render-performance-results.json](render-performance-results.json)。
+这些是组件处理和布局耗时，不能换算为整个程序的帧率或真实终端吞吐。各场景六轮的耗时和 CPU 时间保存在 [render-performance-results.json](render-performance-results.json)。
 
 回归检查还确认：60 KB 预览在 10 次无变化重绘中，全文哈希字符访问从约 600,000 降至 0；恢复的 write 记录在 10 次无变化重绘中，全文分割从 10 次降至 0。测试覆盖原地参数更新、旧异步任务隔离、精确文件写入、多个编辑块、错误显示、主题切换、Unicode、缩放和展开。
 

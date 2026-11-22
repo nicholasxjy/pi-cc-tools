@@ -25,22 +25,6 @@
       "afterCpuMs": 0.46354999999999996
     },
     {
-      "name": "fabric-20000-lines-first",
-      "beforeMs": 13.312667000000033,
-      "afterMs": 13.113291000000004,
-      "timeReductionPercent": 1.4976413065843852,
-      "beforeCpuMs": 17.721,
-      "afterCpuMs": 17.766
-    },
-    {
-      "name": "fabric-20000-lines-invalidate",
-      "beforeMs": 0.323433399999999,
-      "afterMs": 0.3655749999999898,
-      "timeReductionPercent": -13.029452122134266,
-      "beforeCpuMs": 0.3798,
-      "afterCpuMs": 0.437
-    },
-    {
       "name": "replace-5000-unrelated-words",
       "beforeMs": 3.637917000000016,
       "afterMs": 3.7399580000000014,
@@ -126,7 +110,6 @@
       "node": "v26.13.0",
       "platform": "darwin/arm64",
       "width": 100,
-      "retainedPreviewRows": 5,
       "results": [
         {
           "name": "running-group-200-warm",
@@ -139,18 +122,6 @@
           "iterations": 100,
           "msPerOperation": 0.38155167000000006,
           "cpuMsPerOperation": 0.46473
-        },
-        {
-          "name": "fabric-20000-lines-first",
-          "iterations": 1,
-          "msPerOperation": 13.37566599999991,
-          "cpuMsPerOperation": 17.721
-        },
-        {
-          "name": "fabric-20000-lines-invalidate",
-          "iterations": 5,
-          "msPerOperation": 0.34585839999999735,
-          "cpuMsPerOperation": 0.4044
         },
         {
           "name": "replace-5000-unrelated-words",
@@ -218,7 +189,6 @@
       "node": "v26.13.0",
       "platform": "darwin/arm64",
       "width": 100,
-      "retainedPreviewRows": 5,
       "results": [
         {
           "name": "running-group-200-warm",
@@ -231,18 +201,6 @@
           "iterations": 100,
           "msPerOperation": 0.3860537499999998,
           "cpuMsPerOperation": 0.41637
-        },
-        {
-          "name": "fabric-20000-lines-first",
-          "iterations": 1,
-          "msPerOperation": 12.948000000000093,
-          "cpuMsPerOperation": 17.449
-        },
-        {
-          "name": "fabric-20000-lines-invalidate",
-          "iterations": 5,
-          "msPerOperation": 0.32109179999999926,
-          "cpuMsPerOperation": 0.3754
         },
         {
           "name": "replace-5000-unrelated-words",
@@ -310,7 +268,6 @@
       "node": "v26.13.0",
       "platform": "darwin/arm64",
       "width": 100,
-      "retainedPreviewRows": 5,
       "results": [
         {
           "name": "running-group-200-warm",
@@ -323,18 +280,6 @@
           "iterations": 100,
           "msPerOperation": 0.3823554100000001,
           "cpuMsPerOperation": 0.45481
-        },
-        {
-          "name": "fabric-20000-lines-first",
-          "iterations": 1,
-          "msPerOperation": 13.312667000000033,
-          "cpuMsPerOperation": 17.912
-        },
-        {
-          "name": "fabric-20000-lines-invalidate",
-          "iterations": 5,
-          "msPerOperation": 0.323433399999999,
-          "cpuMsPerOperation": 0.3798
         },
         {
           "name": "replace-5000-unrelated-words",
@@ -404,7 +349,6 @@
       "node": "v26.13.0",
       "platform": "darwin/arm64",
       "width": 100,
-      "retainedPreviewRows": 5,
       "results": [
         {
           "name": "running-group-200-warm",
@@ -417,18 +361,6 @@
           "iterations": 100,
           "msPerOperation": 0.3790033400000004,
           "cpuMsPerOperation": 0.46781999999999996
-        },
-        {
-          "name": "fabric-20000-lines-first",
-          "iterations": 1,
-          "msPerOperation": 13.113291000000004,
-          "cpuMsPerOperation": 17.513
-        },
-        {
-          "name": "fabric-20000-lines-invalidate",
-          "iterations": 5,
-          "msPerOperation": 0.3722831999999926,
-          "cpuMsPerOperation": 0.48339999999999994
         },
         {
           "name": "replace-5000-unrelated-words",
@@ -496,7 +428,6 @@
       "node": "v26.13.0",
       "platform": "darwin/arm64",
       "width": 100,
-      "retainedPreviewRows": 5,
       "results": [
         {
           "name": "running-group-200-warm",
@@ -509,18 +440,6 @@
           "iterations": 100,
           "msPerOperation": 0.3799091699999997,
           "cpuMsPerOperation": 0.46354999999999996
-        },
-        {
-          "name": "fabric-20000-lines-first",
-          "iterations": 1,
-          "msPerOperation": 13.233249999999998,
-          "cpuMsPerOperation": 17.766
-        },
-        {
-          "name": "fabric-20000-lines-invalidate",
-          "iterations": 5,
-          "msPerOperation": 0.35691679999999903,
-          "cpuMsPerOperation": 0.437
         },
         {
           "name": "replace-5000-unrelated-words",
@@ -588,7 +507,6 @@
       "node": "v26.13.0",
       "platform": "darwin/arm64",
       "width": 100,
-      "retainedPreviewRows": 5,
       "results": [
         {
           "name": "running-group-200-warm",
@@ -601,18 +519,6 @@
           "iterations": 100,
           "msPerOperation": 0.38727042000000095,
           "cpuMsPerOperation": 0.41918
-        },
-        {
-          "name": "fabric-20000-lines-first",
-          "iterations": 1,
-          "msPerOperation": 13.059624999999983,
-          "cpuMsPerOperation": 17.837
-        },
-        {
-          "name": "fabric-20000-lines-invalidate",
-          "iterations": 5,
-          "msPerOperation": 0.3655749999999898,
-          "cpuMsPerOperation": 0.4284
         },
         {
           "name": "replace-5000-unrelated-words",

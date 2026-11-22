@@ -314,7 +314,7 @@ test("disabled terminalTitle suppresses tool, resume, tree and lifecycle writes"
 		await h.fire(event);
 		await tick();
 	}
-	await h.start("fabric_exec", { display: { name: "Milestone" } }, "outer");
+	await h.start("codemode", { code: "return 1", display: { name: "Check files" } }, "outer");
 	await h.start("read", { path: "app.ts" }, "child", "outer");
 	await h.fire("agent_end", { messages: [{ role: "assistant", content: [], stopReason: "stop" }] });
 	await h.fire("agent_settled", { aborted: false });
@@ -337,10 +337,10 @@ test("disabling terminalTitle suppresses already scheduled writes", async (t) =>
 	assert.equal(h.saved.length, 1);
 });
 
-test("declared milestones win and nested calls cannot replace them", async (t) => {
+test("declared tool titles take precedence and persist through nested calls", async (t) => {
 	const h = harness(t);
-	await h.start("fabric_exec", { display: { name: "检查并修复测试" }, displaySummary: "lower priority" }, "outer");
-	await h.start("codemode", { code: "return 1" }, "child", "outer");
+	await h.start("codemode", { code: "return 1", display: { name: "检查并修复测试" }, displaySummary: "lower priority" }, "outer");
+	await h.start("bash", { command: "npm test" }, "child", "outer");
 	await h.start("read", { path: "package.json" }, "grandchild", "child");
 	await h.fire("tool_execution_end", { toolCallId: "grandchild" });
 	await h.fire("tool_execution_end", { toolCallId: "child" });
@@ -433,7 +433,7 @@ test("titles are plain, bounded Unicode text safe for a terminal OSC string", as
 	const h = harness(t);
 	await h.start("bash", { displaySummary: "\x1b[31m验证\x1b[0m\n\t\x1b]8;;https://example.test\x1b\\测试\x1b]8;;\x1b\\\x07\x9c" });
 	assert.equal(h.titles.at(-1), "验证 测试");
-	await h.start("fabric_exec", { display: { name: "🚀".repeat(121) } });
+	await h.start("bash", { command: "npm test", displaySummary: "🚀".repeat(121) });
 	assert.equal(h.titles.at(-1), `${"🚀".repeat(119)}…`);
 	assert.equal(Array.from(h.titles.at(-1)!).length, 120);
 	assert.equal(h.saved.at(-1).data.title, h.titles.at(-1));

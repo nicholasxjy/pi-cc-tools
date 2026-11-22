@@ -66,10 +66,10 @@ try {
 		stream.updateResult({ content: [{ type: "text", text: output }] }, true);
 	});
 
-	const script = row("fabric_exec", { code: "return 1;" });
-	const result = { content: [{ type: "text", text }], details: { success: true } };
-	measure("fabric-20000-lines-first", 1, () => { script.updateResult(result, false); script.render(100); });
-	measure("fabric-20000-lines-invalidate", 5, () => { script.invalidate(); script.render(100); });
+	const script = row("codemode", { code: "return 1;" });
+	const result = { content: [{ type: "text", text: `Script completed\nWall time 0.1 seconds\nOutput:\n${text}` }] };
+	measure("codemode-20000-lines-first", 1, () => { script.updateResult(result, false); script.render(100); });
+	measure("codemode-20000-lines-invalidate", 5, () => { script.invalidate(); script.render(100); });
 
 	const oldText = Array.from({ length: 5000 }, (_, i) => `old${i}`).join(" ");
 	const newText = Array.from({ length: 5000 }, (_, i) => `new${i}`).join(" ");

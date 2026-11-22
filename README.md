@@ -39,7 +39,7 @@ Shell commands that only change files are drawn the same way. `sed -i`, `perl -p
 
 While a tool runs, the working line names it: `Running npm test…`, `Reading stats.py…`, `Searching for TODO…`, `Waiting for agent: Find edge cases…`. While the model thinks, it shows a playful verb instead. The token count covers everything the model writes for the request, including thinking and tool arguments, and counts up smoothly as text streams in.
 
-The terminal tab or window title also shows the latest execution step. It uses a declared `display.name` (such as Fabric's milestone) or `displaySummary` when available, otherwise the same tool activity descriptions as the working line. A named execution keeps its title while nested tools run. Once the full task settles, the title shows `✓` and a short, plain-text task summary. The extension makes one background model request with the latest user input and final reply. Extension-triggered runs without user input skip the completion summary. If the model request is unavailable or fails, the title uses the first non-empty line of the user input or final reply. The same title appears in a native notification on Ghostty, iTerm2, WezTerm, and Kitty, or in Pi on other terminals. Failed or aborted runs keep the latest step. The title stays until the next step and is restored from the current branch on resume or reload. Set `"terminalTitle": false` to disable title updates and completion notifications. Run `/reload` after editing the setting.
+The terminal tab or window title also shows the latest execution step. It uses a declared `display.name` or `displaySummary` when available, otherwise the same tool activity descriptions as the working line. A named execution keeps its title while nested tools run. Once the full task settles, the title shows `✓` and a short, plain-text task summary. The extension makes one background model request with the latest user input and final reply. Extension-triggered runs without user input skip the completion summary. If the model request is unavailable or fails, the title uses the first non-empty line of the user input or final reply. The same title appears in a native notification on Ghostty, iTerm2, WezTerm, and Kitty, or in Pi on other terminals. Failed or aborted runs keep the latest step. The title stays until the next step and is restored from the current branch on resume or reload. Set `"terminalTitle": false` to disable title updates and completion notifications. Run `/reload` after editing the setting.
 
 ![The working line during a run](https://raw.githubusercontent.com/FammasMaz/pi-cc-tools/master/docs/media/spinner.gif)
 
@@ -138,9 +138,9 @@ Settings are read from `.pi/settings.json` in the project and from the agent set
 
 The screenshots on this page use `"toolBackground": "transparent"`.
 
-Codemode and [Pi Fabric](https://github.com/fabric-runtime/pi-fabric) (`fabric_exec`) stay outside tool groups so their previews remain visible. Script and output each get their own `codemodePreviewLines` budget, counted after wrapping to the terminal width; headings, status and truncation hints are extra. Click or press `Ctrl+O` to expand using the existing expanded preview limits. Fabric rows show the declared `display.name` when available and preserve the program's output. After editing this setting, run `/reload`.
+Codemode stays outside tool groups so its previews remain visible. The script and its output each get their own `codemodePreviewLines` budget, counted after wrapping to the terminal width. Headings, status and truncation hints are extra. Click or press `Ctrl+O` to expand using the existing expanded preview limits. After editing this setting, run `/reload`.
 
-Scripts use pi's built-in highlighting and syntax colors: JavaScript for codemode, TypeScript for Fabric, or Python when recorded in the Fabric result. Each streamed update appears highlighted immediately. Identical scripts share cached work across rows, redraws and resizing. Scripts over 32,000 characters keep a plain preview to bound tokenization cost.
+Codemode scripts use pi's built-in JavaScript syntax highlighting. Each streamed update appears highlighted immediately. Identical scripts share cached work across rows, redraws and resizing. Scripts over 32,000 characters keep a plain preview to bound tokenization cost.
 
 ### Layout
 
@@ -151,7 +151,7 @@ Scripts use pi's built-in highlighting and syntax colors: JavaScript for codemod
 | `thinkingMode` | `live` | `live` collapses finished thinking to `Thought for Xs`, `full` keeps it expanded, `latest` hides it in all but the latest message |
 | `terminalTitle` | `true` | Show the latest execution step, the completed task summary, and the completion notification in interactive sessions. Run `/reload` after editing |
 | `previewLines` | `8` | Lines in a collapsed preview |
-| `codemodePreviewLines` | `5` | Visible terminal lines in each collapsed codemode or Fabric script and output preview; `0` hides both previews. Accepts non-negative integers; invalid values use `5` |
+| `codemodePreviewLines` | `5` | Visible terminal lines in each collapsed Codemode script and output preview. Set `0` to hide both previews. The setting accepts non-negative integers and defaults to `5` for invalid values. |
 | `expandedPreviewMaxLines` | `4000` | Line limit when a row is expanded |
 | `extraExpandedPreviewMaxLines` | `12000` | Line limit in `Ctrl+Shift+O` mode |
 | `extraToolOutputExpanded` | `false` | Start in `Ctrl+Shift+O` mode |

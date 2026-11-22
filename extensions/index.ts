@@ -1089,7 +1089,7 @@ class WeakComponentSet {
 	}
 }
 
-const NON_GROUPABLE_TOOL_NAMES = new Set(["edit", "write", "apply_patch", "codemode", "fabric_exec"]);
+const NON_GROUPABLE_TOOL_NAMES = new Set(["edit", "write", "apply_patch", "codemode"]);
 const ACTIVE_TOOL_GROUPS = new WeakComponentSet();
 const pendingThinkingMerges = new WeakSet<object>();
 
@@ -3998,9 +3998,6 @@ function syncLiveToolRenderState(component: any): void {
 		isError: component?.result?.isError === true,
 		expanded: component?.expanded === true,
 	};
-	if (component?.toolName === "fabric_exec") {
-		state._codemodeLanguage = component.result?.details?.kernel === "python" ? "python" : "typescript";
-	}
 	syncToolCallStatus(ctxLike);
 	if (component?.isPartial === true && component?.result) {
 		state._liveLineCount = collectLiveToolLines(component.result, ctxLike.expanded, ctxLike).total;
@@ -4112,13 +4109,6 @@ function patchToolExecutionRenderers(): void {
 	const originalHasRendererDefinition = proto.hasRendererDefinition;
 	const originalGetCallRenderer = proto.getCallRenderer;
 	const originalGetResultRenderer = proto.getResultRenderer;
-	const originalGetRenderShell = proto.getRenderShell;
-
-	if (typeof originalGetRenderShell === "function") {
-		proto.getRenderShell = function patchedGetRenderShell() {
-			return this?.toolName === "fabric_exec" ? "default" : originalGetRenderShell.call(this);
-		};
-	}
 
 	if (typeof originalHasRendererDefinition === "function") {
 		proto.hasRendererDefinition = function patchedHasRendererDefinition() {
@@ -4133,9 +4123,6 @@ function patchToolExecutionRenderers(): void {
 				renderApplyPatchCall(args, theme, ctx, (path: string) => shortPath(ctx.cwd ?? process.cwd(), path));
 		}
 		if (toolName === "codemode") return renderCodemodeCall;
-		if (toolName === "fabric_exec") {
-			return (args: any, theme: Theme, ctx: any) => renderCodemodeCall(args, theme, ctx, true);
-		}
 		if (shouldUseGenericToolRenderer(toolName)) {
 			return (args: any, theme: Theme, ctx: any) => renderGenericToolCall(toolName, args, theme, ctx);
 		}
@@ -4150,8 +4137,6 @@ function patchToolExecutionRenderers(): void {
 				renderApplyPatchResult({ content: result.content, details: result.details }, options.isPartial, theme, ctx);
 		} else if (toolName === "codemode") {
 			renderer = renderCodemodeResult;
-		} else if (toolName === "fabric_exec") {
-			renderer = (result: any, options: any, theme: Theme, ctx: any) => renderCodemodeResult(result, options, theme, ctx, true);
 		} else if (shouldUseGenericToolRenderer(toolName)) {
 			renderer = (result: any, options: any, theme: Theme, ctx: any) =>
 				renderGenericToolResult(toolName, result, options, theme, ctx);
@@ -7395,7 +7380,7 @@ function isMcpToolCandidate(tool: unknown): boolean {
 	const rec = tool as Record<string, unknown> | undefined;
 	const name = typeof rec?.name === "string" ? rec.name : "";
 	const description = typeof rec?.description === "string" ? rec.description : "";
-	return name !== "fabric_exec" && (name === "mcp" || /\bmcp\b/i.test(description));
+	return name === "mcp" || /\bmcp\b/i.test(description);
 }
 
 function isOpenAiToolCandidate(tool: unknown): boolean {
@@ -7488,7 +7473,7 @@ class CodemodePreview extends ToolText {
 	}
 }
 
-function codemodeCode(code: string, theme: Theme, ctx: any, language = "javascript"): string {
+function codemodeCode(code: string, theme: Theme, ctx: any): string {
 	// shortcut: cap tokenization at MAX_HL_CHARS; highlight a visible prefix if larger scripts need color.
 	if (code.length > MAX_HL_CHARS) {
 		ctx.state._codemodeHighlight = undefined;
@@ -7498,38 +7483,35 @@ function codemodeCode(code: string, theme: Theme, ctx: any, language = "javascri
 		"muted", "syntaxKeyword", "syntaxType", "syntaxNumber", "syntaxString", "syntaxComment",
 		"syntaxFunction", "syntaxPunctuation", "syntaxVariable", "syntaxOperator",
 	] as const;
-	const key = `${palette.map((token) => theme.getFgAnsi(token)).join("\0")}\0${language}\0${code}`;
+	const key = `${palette.map((token) => theme.getFgAnsi(token)).join("\0")}\0${code}`;
 	if (ctx.state._codemodeHighlight?.key !== key) {
 		// Use the same synchronous highlighter while streaming and after completion to avoid recoloring a whole block.
-		const text = codemodeHighlightCache.get(key) ?? highlightCode(code, language).join("\n");
+		const text = codemodeHighlightCache.get(key) ?? highlightCode(code, "javascript").join("\n");
 		if (ANSI_PRESENT_RE.test(text)) touchCache(codemodeHighlightCache, key, text);
 		ctx.state._codemodeHighlight = { key, text };
 	}
 	return ctx.state._codemodeHighlight.text;
 }
 
-function renderCodemodeCall(args: any, theme: Theme, ctx: any, fabric = false): Container {
+function renderCodemodeCall(args: any, theme: Theme, ctx: any): Container {
 	syncToolCallStatus(ctx);
 	const component = ctx.lastComponent instanceof Container ? ctx.lastComponent : new Container();
 	component.clear();
-	const summary = fabric ? cleanIntentLabel(typeof args?.display === "string" ? args.display : args?.display?.name) : "";
-	component.addChild(makeText(undefined, toolHeader(fabric ? "Fabric" : "Codemode", summary, theme, toolStatusDot(ctx, theme), liveLineCountTrailing(ctx, theme))));
-	const source = fabric && Array.isArray(args?.code) ? args.code.join("\n") : getStringArg(args, "code");
-	const code = source.replace(/\r/g, "").trimEnd();
+	component.addChild(makeText(undefined, toolHeader("Codemode", "", theme, toolStatusDot(ctx, theme), liveLineCountTrailing(ctx, theme))));
+	const code = getStringArg(args, "code").replace(/\r/g, "").trimEnd();
 	if (code && (ctx.expanded || codemodePreviewLimit() > 0)) {
-		const language = fabric ? ctx.state._codemodeLanguage ?? "typescript" : "javascript";
-		component.addChild(new CodemodePreview(codemodeCode(code, theme, ctx, language), !!ctx.expanded, theme));
+		component.addChild(new CodemodePreview(codemodeCode(code, theme, ctx), !!ctx.expanded, theme));
 	}
 	return component;
 }
 
-function renderCodemodeResult(result: any, options: any, theme: Theme, ctx: any, fabric = false): Container | Text {
+function renderCodemodeResult(result: any, options: any, theme: Theme, ctx: any): Container | Text {
 	if (options.isPartial) {
 		delete ctx.state._codemodeResult;
 		return makeText(ctx.lastComponent, runningPreviewBlock(result, "", !!options.expanded, theme, ctx));
 	}
 	clearBlinkTimer(ctx);
-	const isError = ctx.isError || (fabric && result.details?.success === false);
+	const isError = ctx.isError;
 	setToolStatus(ctx, isError ? "error" : "success");
 	const raw = getTextContent(result).replace(/\r\n/g, "\n");
 	const limit = options.expanded ? expandedPreviewLimit() : codemodePreviewLimit();
@@ -7537,12 +7519,11 @@ function renderCodemodeResult(result: any, options: any, theme: Theme, ctx: any,
 	if (cached && cached.component === ctx.lastComponent && cached.raw === raw
 		&& cached.expanded === !!options.expanded && cached.limit === limit
 		&& cached.extra === extraToolOutputExpanded && cached.isError === isError
-		&& cached.success === result.details?.success && cached.path === result.details?.fullOutputPath
+		&& cached.path === result.details?.fullOutputPath
 		&& cached.epoch === _toolBranchVisualEpoch) return cached.component;
-	const header = fabric ? null : /^Script (completed|failed)\nWall time ([\d.]+) seconds\nOutput:\n/.exec(raw);
+	const header = /^Script (completed|failed)\nWall time ([\d.]+) seconds\nOutput:\n/.exec(raw);
 	const output = (header ? raw.slice(header[0].length) : raw).trim();
-	const completed = !!header || (fabric && result.details?.success === true);
-	const status = isError || header?.[1] === "failed" ? "Failed" : completed ? "Completed" : "Done";
+	const status = isError || header?.[1] === "failed" ? "Failed" : header ? "Completed" : "Done";
 	const summary = `${status}${header ? ` · ${header[2]}s` : ""}${output && !options.expanded && codemodePreviewLimit() === 0 ? toolOutputDetailHint(theme, false) : ""}`;
 	const component = ctx.lastComponent instanceof Container ? ctx.lastComponent : new Container();
 	component.clear();
@@ -7555,7 +7536,7 @@ function renderCodemodeResult(result: any, options: any, theme: Theme, ctx: any,
 		component.addChild(makeText(undefined, withBranch(theme.fg("muted", `Full output: ${result.details.fullOutputPath}`), theme)));
 	}
 	ctx.state._codemodeResult = { raw, expanded: !!options.expanded, limit, extra: extraToolOutputExpanded,
-		isError, success: result.details?.success, path: result.details?.fullOutputPath,
+		isError, path: result.details?.fullOutputPath,
 		epoch: _toolBranchVisualEpoch, component };
 	return component;
 }
