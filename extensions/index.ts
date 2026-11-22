@@ -19,12 +19,12 @@ import {
 	keyHint,
 	keyText,
 	rawKeyHint,
-	createBashTool,
-	createEditTool,
+	createBashToolDefinition,
+	createEditToolDefinition,
 	createFindTool,
 	createGrepTool,
 	createLsTool,
-	createReadTool,
+	createReadToolDefinition,
 	createWriteTool,
 	highlightCode,
 } from "@earendil-works/pi-coding-agent";
@@ -9120,18 +9120,9 @@ export default function (pi: ExtensionAPI) {
 	const cwd = process.cwd();
 	const sp = (path: string) => shortPath(cwd, path);
 
-	const readTool = createReadTool(cwd);
+	const readTool = createReadToolDefinition(cwd);
 	pi.registerTool({
-		name: "read",
-		label: "read",
-		description: readTool.description,
-		promptSnippet: (readTool as any).promptSnippet,
-		promptGuidelines: (readTool as any).promptGuidelines,
-		parameters: readTool.parameters,
-		async execute(toolCallId, params, signal, onUpdate, ctx) {
-			// Pi's typings for this tool lag its runtime, which reads ctx.cwd/model; forward ctx anyway.
-			return (readTool.execute as (...args: unknown[]) => ReturnType<typeof readTool.execute>)(toolCallId, params, signal, onUpdate, ctx);
-		},
+		...readTool,
 		renderCall(args, theme, ctx) {
 			syncToolCallStatus(ctx);
 			// SKILL.md reads: render as [skill] block matching /skill:name style
@@ -9190,7 +9181,7 @@ export default function (pi: ExtensionAPI) {
 			intentNoticeUi?.notify?.(message, "warning");
 		} catch { /* session ended */ }
 	};
-	const bashTool = createBashTool(cwd);
+	const bashTool = createBashToolDefinition(cwd);
 	// Read once per load: "model" changes the bash tool and the model's instructions, which are
 	// fixed when the tool registers, so every mode switch applies on the next start or /reload.
 	const bashIntentMode: BashIntentMode = normalizeBashIntentMode(readSettings().bashIntent);
@@ -9224,16 +9215,13 @@ export default function (pi: ExtensionAPI) {
 	} as typeof bashTool.parameters;
 	const bashIntentGuidelines = bashIntentEnabled
 		? [
-			...((bashTool as any).promptGuidelines ?? []),
+			...(bashTool.promptGuidelines ?? []),
 			"When calling bash, include displaySummary: a concise user-facing purpose in the user's current language. Do not include credentials, secrets, or command output.",
 		]
-		: (bashTool as any).promptGuidelines;
+		: bashTool.promptGuidelines;
 
 	pi.registerTool({
-		name: "bash",
-		label: "bash",
-		description: bashTool.description,
-		promptSnippet: (bashTool as any).promptSnippet,
+		...bashTool,
 		promptGuidelines: bashIntentGuidelines,
 		parameters: bashIntentEnabled ? bashParameters : bashTool.parameters,
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
@@ -9244,8 +9232,7 @@ export default function (pi: ExtensionAPI) {
 			// Local labels are asked for only here, when a command really runs, never on redraws.
 			if (bashIntentMode === "local" && typeof bashParams.command === "string") requestLocalIntent(bashParams.command);
 			const before = fileEdit ? snapshotBashFileEdit(cwd, fileEdit) : undefined;
-			// Pi's typings lag its runtime, which builds PI_* env vars and cwd from ctx; forward ctx anyway.
-			const result = await (bashTool.execute as (...args: unknown[]) => ReturnType<typeof bashTool.execute>)(toolCallId, bashParams, signal, onUpdate, ctx);
+			const result = await bashTool.execute(toolCallId, bashParams, signal, onUpdate, ctx);
 			if (fileEdit && before) {
 				const details = result.details && typeof result.details === "object" ? result.details : {};
 				(result as any).details = { ...details, fileEdits: collectBashFileEdits(cwd, fileEdit, before) };
@@ -9634,7 +9621,7 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	const editTool = createEditTool(cwd);
+	const editTool = createEditToolDefinition(cwd);
 	// The live preview and execute() share one look at the file, taken before the edit runs: what the row shows live is
 	// then exactly what is saved with the result, and so what it shows again after a resume.
 	const localizeEditOnce = (toolCallId: string, filePath: string, operations: Array<{ oldText: string; newText: string }>) => {
@@ -9643,22 +9630,15 @@ export default function (pi: ExtensionAPI) {
 		return localized;
 	};
 	pi.registerTool({
-		name: "edit",
-		label: "edit",
-		// Pi's built-in edit draws its own shell (no padding); ours uses the standard one, like
-		// every other tool. Without this, older pi falls back to the built-in "self" shell
-		// while pi 1.4+ uses "default", so the row shifted by a column between versions.
+		...editTool,
+		// Pi's built-in edit draws its own shell (no padding); ours uses the standard one.
 		renderShell: "default",
-		description: editTool.description,
-		promptSnippet: (editTool as any).promptSnippet,
-		promptGuidelines: (editTool as any).promptGuidelines,
-		parameters: editTool.parameters,
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			const fp = params.path ?? (params as any).file_path ?? "";
 			const operations = getEditOperations(params);
 			const localizedDiffs = await localizeEditOnce(toolCallId, fp, operations);
 			EDIT_LOCALIZED.delete(toolCallId);
-			const result = await (editTool.execute as (...args: unknown[]) => ReturnType<typeof editTool.execute>)(toolCallId, params, signal, onUpdate, ctx);
+			const result = await editTool.execute(toolCallId, params, signal, onUpdate, ctx);
 			if (operations.length === 0) return result;
 			const { diffs, summary, totalLines, totalHunks } = summarizeEditOperations(operations, localizedDiffs?.map((entry) => entry.diff));
 			const baseDetails = (((result as any).details ?? {}) as Record<string, unknown>);

@@ -6,21 +6,30 @@ import * as real from "@earendil-works/pi-coding-agent";
 export * from "@earendil-works/pi-coding-agent";
 
 const received = (globalThis.__piToolCtxReceived ??= new Map());
+export const outputSchemas = new Map();
 
 function recording(name, factory) {
-	return (...factoryArgs) => ({
-		...factory(...factoryArgs),
-		async execute(...args) {
-			received.set(name, { argc: args.length, ctx: args[4] });
-			return { content: [{ type: "text", text: "" }], details: {} };
-		},
-	});
+	return (...factoryArgs) => {
+		const definition = factory(...factoryArgs);
+		if (name === "read" || name === "bash") {
+			// The test dependency predates structured tool outputs.
+			definition.outputSchema ??= { type: "object" };
+			outputSchemas.set(name, definition.outputSchema);
+		}
+		return {
+			...definition,
+			async execute(...args) {
+				received.set(name, { argc: args.length, ctx: args[4] });
+				return { content: [{ type: "text", text: "" }], details: {} };
+			},
+		};
+	};
 }
 
-export const createReadTool = recording("read", real.createReadTool);
-export const createBashTool = recording("bash", real.createBashTool);
+export const createReadToolDefinition = recording("read", real.createReadToolDefinition);
+export const createBashToolDefinition = recording("bash", real.createBashToolDefinition);
 export const createGrepTool = recording("grep", real.createGrepTool);
 export const createFindTool = recording("find", real.createFindTool);
 export const createLsTool = recording("ls", real.createLsTool);
 export const createWriteTool = recording("write", real.createWriteTool);
-export const createEditTool = recording("edit", real.createEditTool);
+export const createEditToolDefinition = recording("edit", real.createEditToolDefinition);

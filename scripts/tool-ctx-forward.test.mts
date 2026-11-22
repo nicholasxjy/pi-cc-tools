@@ -32,6 +32,7 @@ const tools = new Map<string, any>();
 	getAllTools: () => [...tools.values()],
 } as any);
 
+const { outputSchemas } = await import("./tool-ctx-forward.shim.mjs");
 const received: Map<string, { argc: number; ctx: unknown }> = (globalThis as any).__piToolCtxReceived;
 assert.ok(received, "shim loader must have replaced the Pi tool factories");
 
@@ -61,5 +62,23 @@ for (const name of ["read", "bash", "grep", "find", "ls", "write", "edit"]) {
 		assert.ok(call, `${name} built-in execute was called`);
 		assert.equal(call.argc, 5, `${name} must call the built-in with 5 arguments`);
 		assert.equal(call.ctx, ctx, `${name} must pass the 5th ctx argument through unchanged`);
+	});
+}
+
+for (const name of ["read", "bash"]) {
+	test(`${name} override registers the built-in output schema`, () => {
+		assert.ok(outputSchemas.has(name));
+		assert.equal(tools.get(name).outputSchema, outputSchemas.get(name));
+	});
+}
+
+const replacement = { oldText: "a", newText: "b" };
+const editInputs = {
+	"top-level oldText and newText": { path: "x.txt", ...replacement },
+	"a JSON string array": { path: "x.txt", edits: JSON.stringify([replacement]) },
+};
+for (const [form, args] of Object.entries(editInputs)) {
+	test(`edit override normalizes ${form} before validation`, () => {
+		assert.deepEqual(tools.get("edit").prepareArguments(args), { path: "x.txt", edits: [replacement] });
 	});
 }
