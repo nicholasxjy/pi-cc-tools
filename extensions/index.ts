@@ -3677,12 +3677,20 @@ function installPromptMarkerEditor(ctx: any): void {
 		const editor: any = previous?.(tui, theme, keybindings) ?? new CustomEditor(tui, theme, keybindings);
 		if (typeof editor?.render !== "function") return editor;
 		const render = editor.render.bind(editor);
+		const hasPowerlinePrompt = typeof editor.renderEmbeddedTopBorder === "function";
 		editor.render = (width: number) => {
-			// Every render: pi re-applies the editorPaddingX setting after creation.
-			if ((editor.paddingX ?? 0) < USER_MESSAGE_PAD) editor.paddingX = USER_MESSAGE_PAD;
+			// Powerline reserves space for its own prompt. Pi reapplies the native padding setting after creation.
+			if (!hasPowerlinePrompt && (editor.paddingX ?? 0) < USER_MESSAGE_PAD) editor.paddingX = USER_MESSAGE_PAD;
 			const lines: string[] = render(width);
-			if (Array.isArray(lines) && lines.length > 1) lines[1] = markUserPromptLine(lines[1]);
-			return lines;
+			if (!Array.isArray(lines) || lines.length < 2) return lines;
+			const line = lines[1];
+			const marked = hasPowerlinePrompt
+				? line.replace(/^( \x1b\[[0-9;]+m)>(?=\x1b\[0m )/, `$1${USER_PROMPT_MARK}`)
+				: markUserPromptLine(line);
+			if (marked === line) return lines;
+			const result = [...lines];
+			result[1] = marked;
+			return result;
 		};
 		return editor;
 	};

@@ -109,6 +109,29 @@ test("a past prompt is one line marked ❯", () => {
 	assert.deepEqual(lines.map((line) => line.trimEnd()), [" ❯ fix the failing test"]);
 });
 
+test("the Powerline editor uses one prompt prefix and keeps the shell marker", async () => {
+	let prompt = ">";
+	let factory = () => ({
+		paddingX: 0,
+		renderEmbeddedTopBorder() {},
+		render() {
+			return ["───", ` \x1b[38;2;200;200;200m${prompt}\x1b[0m ${" ".repeat(this.paddingX)}draft`, "───"];
+		},
+	});
+	const sessionUi = {
+		notify() {}, setWidget() {}, theme: themes.theme,
+		getEditorComponent: () => factory,
+		setEditorComponent: (next: typeof factory) => { factory = next; },
+	};
+	for (const handler of handlers.get("session_start") ?? []) {
+		await handler({ reason: "startup" }, { hasUI: true, ui: sessionUi });
+	}
+	const editor = factory();
+	assert.equal(plain(editor.render()[1]), " ❯ draft");
+	prompt = "$";
+	assert.equal(plain(editor.render()[1]), " $ draft");
+});
+
 test("a bash command that only edits a file is drawn as an edit with its diff", async () => {
 	writeFileSync(join(cwd, "stats.py"), "def mean(values):\n    return 0\n");
 	const command = "sed -i.bak 's/return 0/return 1/' stats.py";
