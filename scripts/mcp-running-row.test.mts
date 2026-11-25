@@ -30,6 +30,7 @@ initTheme("dark", false);
 
 const names = ["mcp__subagents__Agent", "mcp__magic-context__ctx_reduce", "mcp__subagents__get_subagent_result"];
 const mcpTools = names.map((name) => ({ name, label: name, description: "Tool from an MCP server", parameters: {}, execute: async () => ({ content: [] }) }));
+const fabricTool = { name: "fabric_exec", description: "Compose Pi core tools, MCP, and extensions", execute: async () => ({ content: [] }) };
 const tools = new Map<string, any>();
 const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
 const fakePi = {
@@ -38,7 +39,7 @@ const fakePi = {
 	registerShortcut() {},
 	on: (event: string, handler: any) => handlers.set(event, [...(handlers.get(event) ?? []), handler]),
 	getThinkingLevel: () => "off",
-	getAllTools: () => [...mcpTools, ...tools.values()],
+	getAllTools: () => [fabricTool, ...mcpTools, ...tools.values()],
 };
 (await import("../extensions/index.ts")).default(fakePi as any);
 async function fire(event: string) {
@@ -56,6 +57,11 @@ function row(name: string, args: Record<string, unknown>, expanded = false) {
 	component.setExpanded(expanded);
 	return component;
 }
+
+test("Fabric keeps its execution definition when its description mentions MCP", () => {
+	assert.equal(tools.has("fabric_exec"), false, "MCP registration must leave Fabric's loadout and execution hooks intact");
+	assert.ok(tools.has(names[0]), "actual MCP tools are still wrapped");
+});
 
 test("a direct MCP tool header names the server, tool and its main argument", () => {
 	const agent = row("mcp__subagents__Agent", { description: "Debug GSM-T NaN", prompt: "long prompt" });

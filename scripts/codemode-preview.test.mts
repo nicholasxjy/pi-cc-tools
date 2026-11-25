@@ -55,8 +55,11 @@ function result(text = output, isError = false, details?: unknown) {
 		isError, details,
 	};
 }
+function toolRow(name: string, args: unknown, definition?: any) {
+	return new ToolExecutionComponent(name, `${name}-${Math.random()}`, args, { showImages: false }, definition, { requestRender() {} } as any, agentDir) as any;
+}
 function row(code = script, finished: any = result(), complete = true) {
-	const component = new ToolExecutionComponent("codemode", `codemode-${Math.random()}`, { code }, { showImages: false }, undefined, { requestRender() {} } as any, agentDir) as any;
+	const component = toolRow("codemode", { code });
 	if (complete) component.setArgsComplete();
 	component.updateResult(finished, false);
 	return component;
@@ -145,6 +148,67 @@ test("codemode remains visible between adjacent tools and consecutive codemode c
 	chat.addChild(second);
 	assert.deepEqual(chat.children, [read, first, second]);
 	assert.equal(outputLines(chat.render(100).map(plain)).length, 10);
+});
+
+test("fabric_exec keeps its own row, display name and separate codemode preview limits", () => {
+	settings(2);
+	const fabric = toolRow("fabric_exec", { display: { name: "Inspect sources" }, code: script });
+	const chat = new Container();
+	const read = toolRow("read", { path: "a.ts" });
+	chat.addChild(read);
+	chat.addChild(fabric);
+	assert.deepEqual(chat.children, [read, fabric]);
+	assert.ok(visible(fabric).some((line) => /Fabric.*Inspect sources/.test(line)));
+	assert.equal(codeLines(visible(fabric)).length, 2);
+	fabric.setArgsComplete();
+	fabric.updateResult({ content: [{ type: "text", text: output }], details: { kernel: "typescript", success: true } });
+	assert.equal(outputLines(visible(fabric)).length, 2);
+	fabric.setExpanded(true);
+	assert.equal(codeLines(visible(fabric)).length, 12);
+	assert.equal(outputLines(visible(fabric)).length, 12);
+});
+
+test("Fabric previews its accepted shorthand arguments while they stream", () => {
+	settings();
+	const fabric = toolRow("fabric_exec", 'return "early"');
+	assert.ok(visible(fabric).some((line) => line.endsWith('return "early"')));
+	fabric.updateArgs({ display: "Inspect files", code: ["files = []", "return files"] });
+	assert.ok(visible(fabric).some((line) => line.endsWith("Fabric Inspect files")));
+	assert.ok(visible(fabric).some((line) => line.endsWith("return files")));
+	fabric.updateArgs({ display: '{"name":"Count files"}', code: "return 0" });
+	assert.ok(visible(fabric).some((line) => line.endsWith("Fabric Count files")));
+});
+
+test("Fabric renders raw output literally, even when it begins with a native codemode header", () => {
+	settings();
+	const fabric = toolRow("fabric_exec", { code: 'return "text"' });
+	const literal = "Script failed\nWall time 1 seconds\nOutput:\nreturned verbatim";
+	fabric.updateResult({ content: [{ type: "text", text: literal }], details: { success: true } });
+	const lines = visible(fabric);
+	assert.ok(lines.some((line) => line.endsWith("Script failed")));
+	assert.ok(lines.some((line) => line.endsWith("returned verbatim")));
+	assert.ok(!lines.some((line) => line.includes("Failed · 1s")));
+	fabric.updateResult({ content: [{ type: "text", text: "Type errors; code was not executed:" }], isError: true });
+	assert.ok(visible(fabric).some((line) => line.endsWith("Failed")));
+	assert.ok(visible(fabric).some((line) => line.includes("Type errors")));
+});
+
+test("Fabric selects its live or recorded kernel and caches identical source per language", (t) => {
+	settings();
+	const tokenizer = t.mock.method(hljs, "highlight");
+	const code = 'return "shared between kernels"';
+	const ts = toolRow("fabric_exec", { code });
+	const py = toolRow("fabric_exec", { code }, { parameters: { properties: { code: { description: "Python async function body executed by Monty" } } } });
+	row(code);
+	const languages = () => tokenizer.mock.calls.filter((call) => call.arguments[0] === code).map((call) => call.arguments[1].language);
+	assert.deepEqual(languages(), ["typescript", "python", "javascript"]);
+	const tsHighlight = ts.rendererState._codemodeHighlight;
+	const pyHighlight = py.rendererState._codemodeHighlight;
+	ts.updateResult({ content: [], details: { kernel: "python" } });
+	py.updateResult({ content: [], details: { kernel: "typescript" } });
+	assert.deepEqual(ts.rendererState._codemodeHighlight, pyHighlight);
+	assert.deepEqual(py.rendererState._codemodeHighlight, tsHighlight);
+	assert.equal(languages().length, 3);
 });
 
 test("partial updates retain the script preview and final updates reveal output", () => {

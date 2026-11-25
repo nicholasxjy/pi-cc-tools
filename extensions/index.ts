@@ -1089,7 +1089,7 @@ class WeakComponentSet {
 	}
 }
 
-const NON_GROUPABLE_TOOL_NAMES = new Set(["edit", "write", "apply_patch", "codemode"]);
+const NON_GROUPABLE_TOOL_NAMES = new Set(["edit", "write", "apply_patch", "codemode", "fabric_exec"]);
 const ACTIVE_TOOL_GROUPS = new WeakComponentSet();
 const pendingThinkingMerges = new WeakSet<object>();
 
@@ -4130,7 +4130,16 @@ function patchToolExecutionRenderers(): void {
 			return (args: any, theme: Theme, ctx: any) =>
 				renderApplyPatchCall(args, theme, ctx, (path: string) => shortPath(ctx.cwd ?? process.cwd(), path));
 		}
-		if (toolName === "codemode") return renderCodemodeCall;
+		if (toolName === "codemode") {
+			return (args: any, theme: Theme, ctx: any) => renderCodeCall(getStringArg(args, "code"), theme, ctx, "Codemode", "javascript");
+		}
+		if (toolName === "fabric_exec") {
+			// Fabric selects one kernel per tool definition and records it in completed results for replay.
+			const recordedKernel = this.result?.details?.kernel;
+			const codeSchema = this.toolDefinition?.parameters?.properties?.code;
+			const kernel = recordedKernel ?? (codeSchema?.description?.startsWith("Python ") ? "python" : "typescript");
+			return (args: any, theme: Theme, ctx: any) => renderFabricCall(args, kernel, theme, ctx);
+		}
 		if (shouldUseGenericToolRenderer(toolName)) {
 			return (args: any, theme: Theme, ctx: any) => renderGenericToolCall(toolName, args, theme, ctx);
 		}
@@ -4143,8 +4152,8 @@ function patchToolExecutionRenderers(): void {
 		if (toolName === "apply_patch") {
 			renderer = (result: any, options: any, theme: Theme, ctx: any) =>
 				renderApplyPatchResult({ content: result.content, details: result.details }, options.isPartial, theme, ctx);
-		} else if (toolName === "codemode") {
-			renderer = renderCodemodeResult;
+		} else if (toolName === "codemode" || toolName === "fabric_exec") {
+			renderer = (result: any, options: any, theme: Theme, ctx: any) => renderCodemodeResult(toolName, result, options, theme, ctx);
 		} else if (shouldUseGenericToolRenderer(toolName)) {
 			renderer = (result: any, options: any, theme: Theme, ctx: any) =>
 				renderGenericToolResult(toolName, result, options, theme, ctx);
@@ -7388,7 +7397,8 @@ function isMcpToolCandidate(tool: unknown): boolean {
 	const rec = tool as Record<string, unknown> | undefined;
 	const name = typeof rec?.name === "string" ? rec.name : "";
 	const description = typeof rec?.description === "string" ? rec.description : "";
-	return name === "mcp" || /\bmcp\b/i.test(description);
+	// Fabric mentions MCP in its description but owns its execution and loadout hooks.
+	return name !== "fabric_exec" && (name === "mcp" || /\bmcp\b/i.test(description));
 }
 
 function isOpenAiToolCandidate(tool: unknown): boolean {
@@ -7481,7 +7491,7 @@ class CodemodePreview extends ToolText {
 	}
 }
 
-function codemodeCode(code: string, theme: Theme, ctx: any): string {
+function codemodeCode(code: string, language: string, theme: Theme, ctx: any): string {
 	// shortcut: cap tokenization at MAX_HL_CHARS; highlight a visible prefix if larger scripts need color.
 	if (code.length > MAX_HL_CHARS) {
 		ctx.state._codemodeHighlight = undefined;
@@ -7491,29 +7501,40 @@ function codemodeCode(code: string, theme: Theme, ctx: any): string {
 		"muted", "syntaxKeyword", "syntaxType", "syntaxNumber", "syntaxString", "syntaxComment",
 		"syntaxFunction", "syntaxPunctuation", "syntaxVariable", "syntaxOperator",
 	] as const;
-	const key = `${palette.map((token) => theme.getFgAnsi(token)).join("\0")}\0${code}`;
+	const key = `${language}\0${palette.map((token) => theme.getFgAnsi(token)).join("\0")}\0${code}`;
 	if (ctx.state._codemodeHighlight?.key !== key) {
 		// Use the same synchronous highlighter while streaming and after completion to avoid recoloring a whole block.
-		const text = codemodeHighlightCache.get(key) ?? highlightCode(code, "javascript").join("\n");
+		const text = codemodeHighlightCache.get(key) ?? highlightCode(code, language).join("\n");
 		if (ANSI_PRESENT_RE.test(text)) touchCache(codemodeHighlightCache, key, text);
 		ctx.state._codemodeHighlight = { key, text };
 	}
 	return ctx.state._codemodeHighlight.text;
 }
 
-function renderCodemodeCall(args: any, theme: Theme, ctx: any): Container {
+function renderFabricCall(args: any, kernel: string, theme: Theme, ctx: any): Container {
+	const source = typeof args === "string" ? args : args?.code;
+	const code = Array.isArray(source) && source.every((line) => typeof line === "string") ? source.join("\n") : source;
+	let display = args?.display;
+	if (typeof display === "string" && display.trimStart().startsWith("{")) {
+		try { display = JSON.parse(display); } catch { /* Incomplete streamed labels are still readable as text. */ }
+	}
+	const title = getStringArg(display, "name", "description") || (typeof args?.display === "string" ? args.display : "");
+	return renderCodeCall(typeof code === "string" ? code : "", theme, ctx, "Fabric", kernel, summarizeText(title, 72));
+}
+
+function renderCodeCall(source: string, theme: Theme, ctx: any, label: string, language: string, summary = ""): Container {
 	syncToolCallStatus(ctx);
 	const component = ctx.lastComponent instanceof Container ? ctx.lastComponent : new Container();
 	component.clear();
-	component.addChild(makeText(undefined, toolHeader("Codemode", "", theme, toolStatusDot(ctx, theme), liveLineCountTrailing(ctx, theme))));
-	const code = getStringArg(args, "code").replace(/\r/g, "").trimEnd();
+	component.addChild(makeText(undefined, toolHeader(label, summary, theme, toolStatusDot(ctx, theme), liveLineCountTrailing(ctx, theme))));
+	const code = source.replace(/\r/g, "").trimEnd();
 	if (code && (ctx.expanded || codemodePreviewLimit() > 0)) {
-		component.addChild(new CodemodePreview(codemodeCode(code, theme, ctx), !!ctx.expanded, theme));
+		component.addChild(new CodemodePreview(codemodeCode(code, language, theme, ctx), !!ctx.expanded, theme));
 	}
 	return component;
 }
 
-function renderCodemodeResult(result: any, options: any, theme: Theme, ctx: any): Container | Text {
+function renderCodemodeResult(toolName: string, result: any, options: any, theme: Theme, ctx: any): Container | Text {
 	if (options.isPartial) {
 		delete ctx.state._codemodeResult;
 		return makeText(ctx.lastComponent, runningPreviewBlock(result, "", !!options.expanded, theme, ctx));
@@ -7529,8 +7550,8 @@ function renderCodemodeResult(result: any, options: any, theme: Theme, ctx: any)
 		&& cached.extra === extraToolOutputExpanded && cached.isError === isError
 		&& cached.path === result.details?.fullOutputPath
 		&& cached.epoch === _toolBranchVisualEpoch) return cached.component;
-	const header = /^Script (completed|failed)\nWall time ([\d.]+) seconds\nOutput:\n/.exec(raw);
-	const output = (header ? raw.slice(header[0].length) : raw).trim();
+	const header = toolName === "codemode" ? /^Script (completed|failed)\nWall time ([\d.]+) seconds\nOutput:\n/.exec(raw) : null;
+	const output = toolName === "fabric_exec" ? raw.trimEnd() : (header ? raw.slice(header[0].length) : raw).trim();
 	const status = isError || header?.[1] === "failed" ? "Failed" : header ? "Completed" : "Done";
 	const summary = `${status}${header ? ` · ${header[2]}s` : ""}${output && !options.expanded && codemodePreviewLimit() === 0 ? toolOutputDetailHint(theme, false) : ""}`;
 	const component = ctx.lastComponent instanceof Container ? ctx.lastComponent : new Container();
