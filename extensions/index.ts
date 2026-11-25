@@ -30,6 +30,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import {
 	Box,
+	type Component,
 	Container,
 	deleteAllKittyImages,
 	getCapabilities,
@@ -1018,10 +1019,7 @@ function getExpandedToolGroupLines(tool: any, width: number, groupedLabel?: stri
 }
 
 function branchPrefix(index: number, total: number, theme?: Theme): string {
-	// Bare tee/corner only — no horizontal ─ arm.
-	const branch = index === total - 1 ? "└" : "├";
-	const rule = currentToolBranchAnsi(theme);
-	return ` ${BRANCH_INDENT}${rule}${branch}${TRANSPARENT_RESET} `;
+	return ` ${toolBranchPrefix(index !== total - 1, theme)}`;
 }
 
 function branchContinuation(index: number, total: number, theme?: Theme): string {
@@ -4134,6 +4132,14 @@ function patchToolExecutionRenderers(): void {
 			return (args: any, theme: Theme, ctx: any) => renderCodeCall(getStringArg(args, "code"), theme, ctx, "Codemode", "javascript");
 		}
 		if (toolName === "fabric_exec") {
+			const native = originalGetCallRenderer?.call(this);
+			if (native) return (args: any, theme: Theme, ctx: any) => {
+				const params = typeof args === "string" ? { code: args } : { ...args, code: args?.code ?? "" };
+				const child = native(params, theme, fabricRenderContext(ctx));
+				syncToolCallStatus(ctx);
+				if (!ctx.isPartial && this.result?.details?.success === false) setToolStatus(ctx, "error");
+				return new FabricToolSection(child, theme, toolStatusDot(ctx, theme));
+			};
 			// Fabric selects one kernel per tool definition and records it in completed results for replay.
 			const recordedKernel = this.result?.details?.kernel;
 			const codeSchema = this.toolDefinition?.parameters?.properties?.code;
@@ -4148,10 +4154,19 @@ function patchToolExecutionRenderers(): void {
 
 	proto.getResultRenderer = function patchedGetResultRenderer() {
 		const toolName = typeof this?.toolName === "string" ? this.toolName : "";
+		const fabricResult = toolName === "fabric_exec" && originalGetResultRenderer?.call(this);
 		let renderer: any;
 		if (toolName === "apply_patch") {
 			renderer = (result: any, options: any, theme: Theme, ctx: any) =>
 				renderApplyPatchResult({ content: result.content, details: result.details }, options.isPartial, theme, ctx);
+		} else if (fabricResult) {
+			renderer = (result: any, options: any, theme: Theme, ctx: any) => {
+				// Pi can reject a call before Fabric supplies its execution details.
+				const displayed = ctx.isError && result.details?.success !== false
+					? { ...result, details: { ...result.details, success: false } } : result;
+				const child = fabricResult(displayed, options, theme, fabricRenderContext(ctx));
+				return new FabricToolSection(child, theme);
+			};
 		} else if (toolName === "codemode" || toolName === "fabric_exec") {
 			renderer = (result: any, options: any, theme: Theme, ctx: any) => renderCodemodeResult(toolName, result, options, theme, ctx);
 		} else if (shouldUseGenericToolRenderer(toolName)) {
@@ -4561,10 +4576,12 @@ function branchIndent(text: string, continued = false, theme?: Theme): string {
 	return `${BRANCH_INDENT}${prefix}${WRAP_MARK}${text}`;
 }
 
+function toolBranchPrefix(continued: boolean, theme?: Theme): string {
+	return `${BRANCH_INDENT}${currentToolBranchAnsi(theme)}${continued ? "├" : "└"}${TRANSPARENT_RESET} `;
+}
+
 function branchLead(text: string, continued = false, theme?: Theme): string {
-	const rule = currentToolBranchAnsi(theme);
-	// Bare tee/corner only — no horizontal ─ arm.
-	return `${BRANCH_INDENT}${rule}${continued ? "├" : "└"}${TRANSPARENT_RESET} ${WRAP_MARK}${text}`;
+	return `${toolBranchPrefix(continued, theme)}${WRAP_MARK}${text}`;
 }
 
 // SGR parameters that set a foreground color: 30–37, 39, 90–97, 38;5;n, 38;2;r;g;b.
@@ -7509,6 +7526,50 @@ function codemodeCode(code: string, language: string, theme: Theme, ctx: any): s
 		ctx.state._codemodeHighlight = { key, text };
 	}
 	return ctx.state._codemodeHighlight.text;
+}
+
+// Keep Fabric in charge of its transcript, including live diffs and compact/full mode.
+// Reserve the gutter before rendering so its own wrapping and diff columns stay aligned.
+class FabricToolSection implements Component {
+	readonly child: Component;
+	private readonly theme: Theme;
+	private readonly statusDot?: string;
+
+	constructor(child: Component, theme: Theme, statusDot?: string) {
+		this.child = child;
+		this.theme = theme;
+		this.statusDot = statusDot;
+	}
+
+	render(width: number): string[] {
+		if (width <= 0) return [];
+		const prefix = this.statusDot ?? toolBranchPrefix(false, this.theme);
+		const gutter = visibleWidth(prefix);
+		if (width <= gutter) return this.child.render(width);
+		const rows = this.child.render(width - gutter);
+		if (!rows.length) return [];
+		const title = this.statusDot ? stripAnsi(rows[0]).trimEnd() : "";
+		// Fabric's optional framed shell puts its title just below the top border.
+		const framed = title.startsWith("╭─") && rows.length > 1;
+		const lead = framed ? 1 : 0;
+		const indent = " ".repeat(gutter);
+		const lines = rows.map((row, index) => (index === lead ? prefix : indent) + row);
+		if (title && !framed) {
+			if (/^fabric(?:\s|$)/i.test(title)) {
+				lines[0] = prefix + rows[0].replace(/fabric/i, "Fabric");
+			} else {
+				const heading = toolHeader("Fabric", title, this.theme, prefix, "", "text");
+				lines[0] = truncateToWidth(heading.replace(WRAP_MARK, ""), width);
+			}
+		}
+		return lines;
+	}
+
+	invalidate(): void { this.child.invalidate(); }
+}
+
+function fabricRenderContext(ctx: any) {
+	return ctx.lastComponent instanceof FabricToolSection ? { ...ctx, lastComponent: ctx.lastComponent.child } : ctx;
 }
 
 function renderFabricCall(args: any, kernel: string, theme: Theme, ctx: any): Container {

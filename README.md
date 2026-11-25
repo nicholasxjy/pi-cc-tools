@@ -140,7 +140,7 @@ The screenshots on this page use `"toolBackground": "transparent"`.
 
 Codemode stays outside tool groups so its previews remain visible. The script and its output each get their own `codemodePreviewLines` budget, counted after wrapping to the terminal width. Headings, status and truncation hints are extra. Click or press `Ctrl+O` to expand using the existing expanded preview limits. After editing this setting, run `/reload`.
 
-The `fabric_exec` tool from [pi-fabric](https://github.com/fabric-runtime/pi-fabric) uses the same standalone script and output previews. Its row shows the declared run name when supplied and highlights code for Fabric’s TypeScript or Python kernel. `codemodePreviewLines` and `Ctrl+O` apply to both tools.
+The `fabric_exec` tool from [pi-fabric](https://github.com/fabric-runtime/pi-fabric) gets a standalone row with the same status dot and result indentation as other tools. Fabric’s compact view shows the run title, objective and nested tool activity. Click or press `Ctrl+O` to see the full transcript, including the program and available tool previews. Fabric’s `ui.toolDisplay` controls its collapsed view. When a session has no Fabric renderer available, the row uses `codemodePreviewLines` for its script and output previews.
 
 Codemode scripts use pi's built-in JavaScript syntax highlighting. Each streamed update appears highlighted immediately. Identical scripts share cached work across rows, redraws and resizing. Scripts over 32,000 characters keep a plain preview to bound tokenization cost.
 

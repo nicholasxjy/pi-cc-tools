@@ -24,7 +24,7 @@ settings();
 
 const { ToolExecutionComponent } = await import("@earendil-works/pi-coding-agent");
 const hljs = createRequire(import.meta.resolve("@earendil-works/pi-coding-agent"))("highlight.js/lib/index.js");
-const { Container, visibleWidth } = await import("@earendil-works/pi-tui");
+const { Container, Text, visibleWidth } = await import("@earendil-works/pi-tui");
 const { initTheme, setTheme } = await import("../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js");
 initTheme("dark", false);
 const tools = new Map<string, any>();
@@ -150,7 +150,43 @@ test("codemode remains visible between adjacent tools and consecutive codemode c
 	assert.equal(outputLines(chat.render(100).map(plain)).length, 10);
 });
 
-test("fabric_exec keeps its own row, display name and separate codemode preview limits", () => {
+test("Fabric's registered renderer keeps its live activity and expanded transcript inside the tool row", () => {
+	settings(0);
+	const call = new Text("", 0, 0);
+	const result = new Text("", 0, 0);
+	const definition = {
+		renderCall(args: any, _theme: any, ctx: any) {
+			assert.ok(ctx.lastComponent === undefined || ctx.lastComponent === call);
+			ctx.state.source = args.code;
+			call.setText(ctx.expanded ? `fabric · TypeScript\n${args.code}` : "Inspect sources\nCheck the configured mode");
+			return call;
+		},
+		renderResult(value: any, options: any, _theme: any, ctx: any) {
+			assert.ok(ctx.lastComponent === undefined || ctx.lastComponent === result);
+			assert.equal(ctx.state.source, 'return "ok"');
+			const status = options.isPartial ? "Running" : value.details?.success === false ? "Failed" : "Tools";
+			result.setText(`${status}\n${value.details?.progress ?? value.content[0].text}`);
+			return result;
+		},
+	};
+	const fabric = toolRow("fabric_exec", 'return "ok"', definition);
+	fabric.updateResult({ content: [], details: { progress: "read src/config.ts" } }, true);
+	assert.deepEqual(visible(fabric), ["● Fabric Inspect sources", "Check the configured mode", "└ Running", "read src/config.ts"]);
+	fabric.updateResult({ content: [{ type: "text", text: "Nested tool output" }], details: { success: true } });
+	fabric.setExpanded(true);
+	assert.deepEqual(visible(fabric), ["● Fabric · TypeScript", 'return "ok"', "└ Tools", "Nested tool output"]);
+	for (const width of [20, 44, 80]) {
+		assert.ok(fabric.render(width).every((line: string) => visibleWidth(line) <= width));
+	}
+	fabric.setExpanded(false);
+	const rejected = { content: [{ type: "text", text: "§42§ Invalid arguments" }], isError: true };
+	fabric.updateResult(rejected);
+	assert.deepEqual(visible(fabric).slice(-2), ["└ Failed", "Invalid arguments"]);
+	assert.equal(rejected.content[0].text, "§42§ Invalid arguments");
+	assert.equal("details" in rejected, false);
+});
+
+test("Fabric without a registered renderer keeps its standalone code and output previews", () => {
 	settings(2);
 	const fabric = toolRow("fabric_exec", { display: { name: "Inspect sources" }, code: script });
 	const chat = new Container();
