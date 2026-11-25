@@ -58,7 +58,7 @@ function notifyCompletion(title: string, ctx: ExtensionContext): void {
 export function installTerminalTitle(
 	pi: ExtensionAPI,
 	describeActivity: (name: string, args: any) => string,
-	isEnabled: () => boolean,
+	isEnabled: (cwd: string) => boolean,
 ): void {
 	let title = "";
 	let nextPrompt: string | undefined;
@@ -70,7 +70,7 @@ export function installTerminalTitle(
 	const namedExecutions = new Set<string>();
 
 	function active(ctx: ExtensionContext): boolean {
-		return ctx.mode === "tui" && ctx.hasUI && isEnabled();
+		return ctx.mode === "tui" && ctx.hasUI && isEnabled(ctx.cwd);
 	}
 
 	function write(ctx: ExtensionContext): void {
@@ -90,6 +90,7 @@ export function installTerminalTitle(
 
 	function reassert(_event: unknown, ctx: ExtensionContext): void {
 		if (pendingWrite) clearImmediate(pendingWrite);
+		if (!active(ctx)) return;
 		// Pi applies its own title after these handlers; keep the latest title afterward.
 		pendingWrite = setImmediate(() => {
 			pendingWrite = undefined;
@@ -136,6 +137,8 @@ export function installTerminalTitle(
 	}
 
 	function reset(): void {
+		if (pendingWrite) clearImmediate(pendingWrite);
+		pendingWrite = undefined;
 		cancelSummary();
 		title = "";
 		nextPrompt = taskPrompt = queuedPrompt = finalReply = undefined;
@@ -144,6 +147,7 @@ export function installTerminalTitle(
 
 	function resume(event: unknown, ctx: ExtensionContext): void {
 		reset();
+		if (!active(ctx)) return;
 		try {
 			const branch = ctx.sessionManager.getBranch();
 			for (let i = branch.length - 1; i >= 0; i--) {
@@ -215,9 +219,5 @@ export function installTerminalTitle(
 		}
 		reassert(event, ctx);
 	});
-	pi.on("session_shutdown", () => {
-		if (pendingWrite) clearImmediate(pendingWrite);
-		pendingWrite = undefined;
-		reset();
-	});
+	pi.on("session_shutdown", reset);
 }

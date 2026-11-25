@@ -12,9 +12,9 @@ const spinner = (await import("../extensions/spinner.ts")).default;
 
 const entry = (title: unknown) => ({ type: "custom", customType: "pi-claude-code-ui-terminal-title", data: { title } });
 
-function configure(settings: Record<string, unknown>, scope: "project" | "user" = "user") {
+function configure(settings: Record<string, unknown>, scope: "project" | "user" = "user", cwd = process.cwd()) {
 	const path = scope === "project"
-		? join(process.cwd(), ".pi", "settings.json")
+		? join(cwd, ".pi", "settings.json")
 		: join(process.env.PI_CODING_AGENT_DIR!, "settings.json");
 	mkdirSync(dirname(path), { recursive: true });
 	writeFileSync(path, JSON.stringify(settings));
@@ -304,6 +304,34 @@ test("terminalTitle accepts booleans from project and agent settings", async (t)
 			assert.equal(h.saved.length, value === false ? 0 : 1);
 		}
 	}
+});
+
+test("the session project's terminalTitle overrides the agent setting", async (t) => {
+	const otherProject = join(process.cwd(), "other-project");
+	for (const cwd of [process.cwd(), otherProject]) {
+		for (const enabled of [false, true]) {
+			configure({ terminalTitle: !enabled });
+			configure({ terminalTitle: enabled }, "project", cwd);
+			const h = harness(t);
+			h.ctx.cwd = cwd;
+			h.ctx.ui.setTitle("Fabric title");
+			await h.start("read", { path: "app.ts" });
+			assert.deepEqual(h.titles, enabled ? ["Fabric title", "Reading app.ts"] : ["Fabric title"]);
+		}
+	}
+});
+
+test("a disabled resume cannot reclaim an external title on a later tick", async (t) => {
+	configure({ terminalTitle: false });
+	const h = harness(t);
+	h.setBranch([entry("Old step")]);
+	await h.fire("session_start", { reason: "reload" });
+	h.ctx.ui.setTitle("Fabric title");
+	configure({ terminalTitle: true });
+	await tick();
+	await h.fire("agent_settled");
+	await tick();
+	assert.deepEqual(h.titles, ["Fabric title"]);
 });
 
 test("disabled terminalTitle suppresses tool, resume, tree and lifecycle writes", async (t) => {
