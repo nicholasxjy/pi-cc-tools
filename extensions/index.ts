@@ -4132,18 +4132,21 @@ function patchToolExecutionRenderers(): void {
 			return (args: any, theme: Theme, ctx: any) => renderCodeCall(getStringArg(args, "code"), theme, ctx, "Codemode", "javascript");
 		}
 		if (toolName === "fabric_exec") {
-			const native = originalGetCallRenderer?.call(this);
-			if (native) return (args: any, theme: Theme, ctx: any) => {
-				const params = typeof args === "string" ? { code: args } : { ...args, code: args?.code ?? "" };
-				const child = native(params, theme, fabricRenderContext(ctx));
-				syncToolCallStatus(ctx);
-				if (!ctx.isPartial && this.result?.details?.success === false) setToolStatus(ctx, "error");
-				return new FabricToolSection(child, theme, toolStatusDot(ctx, theme));
-			};
 			// Fabric selects one kernel per tool definition and records it in completed results for replay.
 			const recordedKernel = this.result?.details?.kernel;
 			const codeSchema = this.toolDefinition?.parameters?.properties?.code;
 			const kernel = recordedKernel ?? (codeSchema?.description?.startsWith("Python ") ? "python" : "typescript");
+			const native = originalGetCallRenderer?.call(this);
+			if (native) return (args: any, theme: Theme, ctx: any) => {
+				const params = typeof args === "string" ? { code: args } : { ...args, code: args?.code ?? "" };
+				const callTheme = fabricRowTheme(theme, ctx);
+				const child = native(params, callTheme, fabricRenderContext(ctx));
+				const source = Array.isArray(params.code) ? params.code.join("\n") : params.code;
+				syncToolCallStatus(ctx);
+				if (!ctx.isPartial && this.result?.details?.success === false) setToolStatus(ctx, "error");
+				return new FabricToolSection(child, theme, toolStatusDot(ctx, theme), (width) =>
+					renderFabricSource(child, width, source, kernel, callTheme, theme, ctx));
+			};
 			return (args: any, theme: Theme, ctx: any) => renderFabricCall(args, kernel, theme, ctx);
 		}
 		if (shouldUseGenericToolRenderer(toolName)) {
@@ -4164,7 +4167,7 @@ function patchToolExecutionRenderers(): void {
 				// Pi can reject a call before Fabric supplies its execution details.
 				const displayed = ctx.isError && result.details?.success !== false
 					? { ...result, details: { ...result.details, success: false } } : result;
-				const child = fabricResult(displayed, options, theme, fabricRenderContext(ctx));
+				const child = fabricResult(displayed, options, fabricRowTheme(theme, ctx), fabricRenderContext(ctx));
 				return new FabricToolSection(child, theme);
 			};
 		} else if (toolName === "codemode" || toolName === "fabric_exec") {
@@ -7528,6 +7531,39 @@ function codemodeCode(code: string, language: string, theme: Theme, ctx: any): s
 	return ctx.state._codemodeHighlight.text;
 }
 
+// Fabric's framed layout shares a theme by identity between the call and result slots.
+function fabricRowTheme(theme: Theme, ctx: any): Theme {
+	if (Object.getPrototypeOf(ctx.state._fabricTheme ?? {}) !== theme) ctx.state._fabricTheme = Object.create(theme);
+	return ctx.state._fabricTheme;
+}
+
+function renderFabricSource(child: Component, width: number, source: string, kernel: string, callTheme: Theme, theme: Theme, ctx: any): string[] {
+	// Fabric constructs its source rows at layout time as dim(ordinal) + space + muted(line).
+	// Other call metadata and result text have already been styled with the regular theme.
+	let lineIndex = -1;
+	let styled: string[] | undefined;
+	callTheme.fg = (color, text) => {
+		if (color === "dim" && /^ *[1-9]\d*$/.test(text)) {
+			lineIndex = Number(text) - 1;
+			return "";
+		}
+		if (color === "muted" && lineIndex >= 0) {
+			if (!styled) {
+				// Match Fabric's printable representation before passing guest text to the highlighter.
+				const safe = source.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, (ch) => `\\x${ch.charCodeAt(0).toString(16).padStart(2, "0")}`);
+				styled = codemodeCode(safe, kernel, theme, ctx).split("\n");
+			}
+			const line = styled[lineIndex];
+			lineIndex = -1;
+			if (line !== undefined && (stripAnsi(line) || " ") === text) return line || " ";
+		}
+		lineIndex = -1;
+		return theme.fg(color, text);
+	};
+	try { return child.render(width); }
+	finally { Reflect.deleteProperty(callTheme, "fg"); }
+}
+
 // Keep Fabric in charge of its transcript, including live diffs and compact/full mode.
 // Reserve the gutter before rendering so its own wrapping and diff columns stay aligned.
 class FabricToolSection implements Component {
@@ -7535,7 +7571,10 @@ class FabricToolSection implements Component {
 	private readonly theme: Theme;
 	private readonly statusDot?: string;
 
-	constructor(child: Component, theme: Theme, statusDot?: string) {
+	private readonly renderChild: (width: number) => string[];
+
+	constructor(child: Component, theme: Theme, statusDot?: string, renderChild = (width: number) => child.render(width)) {
+		this.renderChild = renderChild;
 		this.child = child;
 		this.theme = theme;
 		this.statusDot = statusDot;
@@ -7545,8 +7584,8 @@ class FabricToolSection implements Component {
 		if (width <= 0) return [];
 		const prefix = this.statusDot ?? toolBranchPrefix(false, this.theme);
 		const gutter = visibleWidth(prefix);
-		if (width <= gutter) return this.child.render(width);
-		const rows = this.child.render(width - gutter);
+		if (width <= gutter) return this.renderChild(width);
+		const rows = this.renderChild(width - gutter);
 		if (!rows.length) return [];
 		const title = this.statusDot ? stripAnsi(rows[0]).trimEnd() : "";
 		// Fabric's optional framed shell puts its title just below the top border.

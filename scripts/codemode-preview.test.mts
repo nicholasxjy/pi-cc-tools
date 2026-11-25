@@ -186,6 +186,42 @@ test("Fabric's registered renderer keeps its live activity and expanded transcri
 	assert.equal("details" in rejected, false);
 });
 
+test("native Fabric source has kernel syntax colors without ordinals, before wrapping", (t) => {
+	settings();
+	const tokenizer = t.mock.method(hljs, "highlight");
+	const code = ['const greeting = "你好";', "", "/* first", "123 */", "42"].join("\n");
+	const native = {
+		renderCall(args: any, theme: any, ctx: any) {
+			const title = theme.fg("toolTitle", "Fabric");
+			const objective = theme.fg("dim", "123");
+			return { invalidate() {}, render(width: number) {
+				if (!ctx.expanded) return [title, objective];
+				const lines = args.code.split("\n").map((line: string, i: number) =>
+					`${theme.fg("dim", String(i + 1).padStart(2))} ${theme.fg("muted", line || " ")}`);
+				return new Text([title, objective, ...lines].join("\n"), 0, 0).render(width);
+			} };
+		},
+		renderResult(_value: any, _options: any, theme: any) {
+			return new Text(`${theme.fg("dim", "1")} ${theme.fg("muted", "numbered output")}`, 0, 0);
+		},
+	};
+	const fabric = toolRow("fabric_exec", { code }, native);
+	visible(fabric);
+	assert.equal(tokenizer.mock.callCount(), 0, "compact cards do not tokenize hidden scripts");
+	fabric.setExpanded(true);
+	fabric.updateResult({ content: [], details: { kernel: "typescript" } });
+	const lines = fabric.render(80) as string[];
+	assert.deepEqual(lines.map(plain).map((line) => line.trim()).filter(Boolean), [
+		"● Fabric", "123", 'const greeting = "你好";', "/* first", "123 */", "42", "└ 1 numbered output",
+	]);
+	assert.match(lines.find((line) => plain(line).includes("greeting"))!, /\x1b\[38;2;\d+;\d+;\d+m"你好"/);
+	assert.match(lines.find((line) => plain(line).includes("123 */"))!, /\x1b\[38;2;\d+;\d+;\d+m *123 \*\//);
+	assert.ok(fabric.render(18).every((line: string) => visibleWidth(line) <= 18));
+	fabric.updateResult({ content: [], details: { kernel: "python" } });
+	visible(fabric);
+	assert.deepEqual(tokenizer.mock.calls.filter((call) => call.arguments[0] === code).map((call) => call.arguments[1].language), ["typescript", "python"]);
+});
+
 test("Fabric without a registered renderer keeps its standalone code and output previews", () => {
 	settings(2);
 	const fabric = toolRow("fabric_exec", { display: { name: "Inspect sources" }, code: script });
