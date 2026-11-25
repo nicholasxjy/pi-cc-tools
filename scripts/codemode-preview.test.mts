@@ -189,7 +189,8 @@ test("Fabric's registered renderer keeps its live activity and expanded transcri
 test("native Fabric source has kernel syntax colors without ordinals, before wrapping", (t) => {
 	settings();
 	const tokenizer = t.mock.method(hljs, "highlight");
-	const code = ['const greeting = "你好";', "", "/* first", "123 */", "42"].join("\n");
+	const sourceLines = ['const greeting = "你好";', "", "/* first", "123 */", "  if (greeting) {", "    return greeting;", "  }", "42"];
+	const code = sourceLines.join("\n");
 	const native = {
 		renderCall(args: any, theme: any, ctx: any) {
 			const title = theme.fg("toolTitle", "Fabric");
@@ -211,9 +212,12 @@ test("native Fabric source has kernel syntax colors without ordinals, before wra
 	fabric.setExpanded(true);
 	fabric.updateResult({ content: [], details: { kernel: "typescript" } });
 	const lines = fabric.render(80) as string[];
-	assert.deepEqual(lines.map(plain).map((line) => line.trim()).filter(Boolean), [
-		"● Fabric", "123", 'const greeting = "你好";', "/* first", "123 */", "42", "└ 1 numbered output",
-	]);
+	const displayed = lines.map(plain).map((line) => line.trimEnd());
+	const objective = displayed.findIndex((line) => line.trim() === "123");
+	const indent = " ".repeat(displayed[objective].indexOf("123"));
+	assert.deepEqual(displayed.slice(objective + 1, objective + 1 + sourceLines.length),
+		sourceLines.map((line) => line ? indent + line : ""));
+	assert.ok(displayed.some((line) => line.trim() === "└ 1 numbered output"));
 	assert.match(lines.find((line) => plain(line).includes("greeting"))!, /\x1b\[38;2;\d+;\d+;\d+m"你好"/);
 	assert.match(lines.find((line) => plain(line).includes("123 */"))!, /\x1b\[38;2;\d+;\d+;\d+m *123 \*\//);
 	assert.ok(fabric.render(18).every((line: string) => visibleWidth(line) <= 18));

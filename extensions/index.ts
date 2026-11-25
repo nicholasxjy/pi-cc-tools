@@ -7538,27 +7538,23 @@ function fabricRowTheme(theme: Theme, ctx: any): Theme {
 }
 
 function renderFabricSource(child: Component, width: number, source: string, kernel: string, callTheme: Theme, theme: Theme, ctx: any): string[] {
-	// Fabric constructs its source rows at layout time as dim(ordinal) + space + muted(line).
-	// Other call metadata and result text have already been styled with the regular theme.
-	let lineIndex = -1;
+	// Fabric joins dim(ordinal) and muted(line) with a space. Put the source in the first
+	// slot so that separator becomes trailing padding instead of shifting the code right.
+	let sourceLine: string | undefined;
 	let styled: string[] | undefined;
 	callTheme.fg = (color, text) => {
 		if (color === "dim" && /^ *[1-9]\d*$/.test(text)) {
-			lineIndex = Number(text) - 1;
-			return "";
-		}
-		if (color === "muted" && lineIndex >= 0) {
 			if (!styled) {
 				// Match Fabric's printable representation before passing guest text to the highlighter.
 				const safe = source.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, (ch) => `\\x${ch.charCodeAt(0).toString(16).padStart(2, "0")}`);
 				styled = codemodeCode(safe, kernel, theme, ctx).split("\n");
 			}
-			const line = styled[lineIndex];
-			lineIndex = -1;
-			if (line !== undefined && (stripAnsi(line) || " ") === text) return line || " ";
+			sourceLine = styled[Number(text) - 1];
+			if (sourceLine !== undefined) return sourceLine;
 		}
-		lineIndex = -1;
-		return theme.fg(color, text);
+		const isSource = color === "muted" && sourceLine !== undefined && (stripAnsi(sourceLine) || " ") === text;
+		sourceLine = undefined;
+		return isSource ? "" : theme.fg(color, text);
 	};
 	try { return child.render(width); }
 	finally { Reflect.deleteProperty(callTheme, "fg"); }
