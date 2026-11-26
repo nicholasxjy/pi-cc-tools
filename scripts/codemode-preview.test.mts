@@ -28,6 +28,7 @@ const { Container, Text, visibleWidth } = await import("@earendil-works/pi-tui")
 const { initTheme, setTheme } = await import("../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js");
 initTheme("dark", false);
 const tools = new Map<string, any>();
+const previousPreviewTheme = process.env.CODE_PREVIEW_THEME;
 (await import("../extensions/index.ts")).default({
 	registerTool: (tool: any) => tools.set(tool.name, tool),
 	registerCommand() {}, registerShortcut() {}, on() {},
@@ -148,6 +149,10 @@ test("codemode remains visible between adjacent tools and consecutive codemode c
 	chat.addChild(second);
 	assert.deepEqual(chat.children, [read, first, second]);
 	assert.equal(outputLines(chat.render(100).map(plain)).length, 10);
+});
+
+test("Fabric gets the VS Code light/dark pair unless a preview theme is already set", () => {
+	assert.equal(process.env.CODE_PREVIEW_THEME, previousPreviewTheme || "light-plus/dark-plus");
 });
 
 test("Fabric's registered renderer keeps its live activity and expanded transcript inside the tool row", () => {

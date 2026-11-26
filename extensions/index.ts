@@ -8716,6 +8716,8 @@ function renderBashFileEditResult(edit: BashFileEdit, records: BashFileEditRecor
 // ===========================================================================
 
 export default function (pi: ExtensionAPI) {
+	// Fabric reads its light/dark preview pair at startup, before applying fabric.json overrides.
+	process.env.CODE_PREVIEW_THEME ||= "light-plus/dark-plus";
 	patchTerminalWriteTagScrubber();
 	patchToolExecutionBackgroundSync();
 	patchToolRenderCacheInvalidation();
