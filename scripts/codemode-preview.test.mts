@@ -1,4 +1,5 @@
 process.env.FORCE_COLOR = "3";
+process.env.COLORTERM = "truecolor";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire, register } from "node:module";
@@ -25,7 +26,7 @@ settings();
 const { ToolExecutionComponent } = await import("@earendil-works/pi-coding-agent");
 const hljs = createRequire(import.meta.resolve("@earendil-works/pi-coding-agent"))("highlight.js/lib/index.js");
 const { Container, Text, visibleWidth } = await import("@earendil-works/pi-tui");
-const { initTheme, setTheme } = await import("../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js");
+const { getThemeByName, initTheme, setTheme, setThemeInstance } = await import("../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js");
 initTheme("dark", false);
 const tools = new Map<string, any>();
 const previousPreviewTheme = process.env.CODE_PREVIEW_THEME;
@@ -153,6 +154,40 @@ test("codemode remains visible between adjacent tools and consecutive codemode c
 
 test("Fabric gets the VS Code light/dark pair unless a preview theme is already set", () => {
 	assert.equal(process.env.CODE_PREVIEW_THEME, previousPreviewTheme || "light-plus/dark-plus");
+});
+
+test("Fabric can resolve diff backgrounds when a custom theme's message and tool rows are transparent", () => {
+	const tokens = ["userMessageBg", "toolSuccessBg", "toolErrorBg"] as const;
+	const native = {
+		renderCall() { return new Text("Fabric", 0, 0); },
+		renderResult(_result: unknown, _options: unknown, theme: any) {
+			return new Text(tokens.map((token) => theme.getBgAnsi(token) + token + "\x1b[49m").join("\n"), 0, 0);
+		},
+	};
+	try {
+		for (const style of ["transparent", "outlines", "default"]) {
+			settings(undefined, { toolBackground: style });
+			const row = toolRow("fabric_exec", { code: "" }, native);
+			row.updateResult({ content: [], details: { success: true } });
+			for (const variant of ["dark", "light", "dark"]) {
+				const theme = Object.assign(getThemeByName(variant)!, { name: "custom" });
+				const panel = theme.getBgAnsi("toolSuccessBg");
+				setThemeInstance(theme);
+				row.invalidate();
+				const rendered = row.render(80).join("\n");
+				for (const token of tokens) {
+					const color = new RegExp(`\\x1b\\[48;2;(\\d+);(\\d+);(\\d+)m${token}`).exec(rendered);
+					assert.ok(color, `${style} supplies a concrete ${token} to Fabric`);
+					assert.equal(color.slice(1).reduce((sum, n) => sum + Number(n), 0) > 450, variant === "light");
+				}
+				assert.equal(theme.getBgAnsi("userMessageBg"), "\x1b[49m", "the outer row stays transparent");
+				if (style === "default") assert.ok(rendered.includes(panel + "toolSuccessBg"));
+			}
+		}
+	} finally {
+		setTheme("dark", false);
+		settings();
+	}
 });
 
 test("Fabric's registered renderer keeps its live activity and expanded transcript inside the tool row", () => {

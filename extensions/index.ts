@@ -7533,7 +7533,19 @@ function codemodeCode(code: string, language: string, theme: Theme, ctx: any): s
 
 // Fabric's framed layout shares a theme by identity between the call and result slots.
 function fabricRowTheme(theme: Theme, ctx: any): Theme {
-	if (Object.getPrototypeOf(ctx.state._fabricTheme ?? {}) !== theme) ctx.state._fabricTheme = Object.create(theme);
+	if (Object.getPrototypeOf(ctx.state._fabricTheme ?? {}) !== theme) {
+		const rowTheme: Theme = Object.create(theme);
+		// Fabric probes the message background for light/dark and mixes diff tints over the tool backgrounds.
+		rowTheme.getBgAnsi = (token) => {
+			const ansi = theme.getBgAnsi(token);
+			if (ansi !== TRANSPARENT_BG) return ansi;
+			if (token !== "userMessageBg" && token !== "toolSuccessBg" && token !== "toolErrorBg") return ansi;
+			const surface = terminalDefaultColors(theme)?.background
+				?? (isLightThemeBackground(theme) ? FALLBACK_BASE_BG_LIGHT : FALLBACK_BASE_BG_DARK);
+			return rgbBgAnsi(theme, surface);
+		};
+		ctx.state._fabricTheme = rowTheme;
+	}
 	return ctx.state._fabricTheme;
 }
 
