@@ -29,17 +29,10 @@ const { Container, Text, visibleWidth } = await import("@earendil-works/pi-tui")
 const { getThemeByName, initTheme, setTheme, setThemeInstance } = await import("../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js");
 initTheme("dark", false);
 const tools = new Map<string, any>();
-const hooks = new Map<string, Function[]>();
-async function emit(type: string, event: object) {
-	let result;
-	for (const handler of hooks.get(type) ?? []) result = await handler({ type, ...event }) ?? result;
-	return result;
-}
 const previousPreviewTheme = process.env.CODE_PREVIEW_THEME;
 (await import("../extensions/index.ts")).default({
 	registerTool: (tool: any) => tools.set(tool.name, tool),
-	registerCommand() {}, registerShortcut() {},
-	on(type: string, handler: Function) { hooks.set(type, [...hooks.get(type) ?? [], handler]); },
+	registerCommand() {}, registerShortcut() {}, on() {},
 	getThinkingLevel: () => "off", getAllTools: () => [...tools.values()],
 } as any);
 
@@ -76,12 +69,12 @@ function row(code = script, finished: any = result(), complete = true) {
 const codeLines = (lines: string[]) => lines.filter((line) => line.includes('text("code-'));
 const outputLines = (lines: string[]) => lines.filter((line) => /output-\d/.test(line));
 
-test("codemode defaults to five script and output lines, excluding its status header", () => {
+test("codemode shows five script lines and folds the output by default", () => {
 	settings();
 	const lines = visible(row());
 	assert.equal(codeLines(lines).length, 5);
-	assert.equal(outputLines(lines).length, 5);
-	assert.equal(lines.filter((line) => /7 more lines.*ctrl\+o/.test(line)).length, 2);
+	assert.equal(outputLines(lines).length, 0);
+	assert.equal(lines.filter((line) => /7 more lines.*ctrl\+o/.test(line)).length, 1);
 	assert.ok(lines.some((line) => /Completed · 0.1s/.test(line)));
 	assert.ok(!lines.some((line) => /Wall time|Output:|Script completed/.test(line)));
 });
@@ -90,8 +83,8 @@ test("codemodePreviewLines overrides the default independently of previewLines",
 	settings(2, { previewLines: 9 });
 	const lines = visible(row());
 	assert.equal(codeLines(lines).length, 2);
-	assert.equal(outputLines(lines).length, 2);
-	assert.equal(lines.filter((line) => /10 more lines/.test(line)).length, 2);
+	assert.equal(outputLines(lines).length, 0);
+	assert.equal(lines.filter((line) => /10 more lines/.test(line)).length, 1);
 });
 
 test("zero hides both previews while expansion still reveals their content", () => {
@@ -108,7 +101,7 @@ test("zero hides both previews while expansion still reveals their content", () 
 for (const value of [-1, 1.5, "2", null]) {
 	test(`invalid preview setting ${JSON.stringify(value)} falls back to five`, () => {
 		settings(value);
-		assert.equal(outputLines(visible(row())).length, 5);
+		assert.equal(codeLines(visible(row())).length, 5);
 	});
 }
 
@@ -116,7 +109,8 @@ test("short content has no unnecessary truncation hint", () => {
 	settings();
 	const lines = visible(row('text("ok");', result("ok")));
 	assert.ok(lines.some((line) => line.includes('text("ok");')));
-	assert.ok(lines.some((line) => /└ ok$/.test(line)));
+	assert.ok(lines.some((line) => /Output · Completed.*ctrl\+o/.test(line)));
+	assert.ok(!lines.includes("ok"));
 	assert.ok(!lines.some((line) => /more lines/.test(line)));
 });
 
@@ -126,8 +120,8 @@ test("long lines wrap before the five-line limit, including after resizing", () 
 	const component = row(long, result(long));
 	for (const width of [40, 80, 40]) {
 		const lines = visible(component, width);
-		assert.equal(lines.filter((line) => /中abcdef/.test(line)).length, 10, `five lines per preview at width ${width}`);
-		assert.equal(lines.filter((line) => /more lines/.test(line)).length, 2);
+		assert.equal(lines.filter((line) => /中abcdef/.test(line)).length, 5, `five source lines at width ${width}`);
+		assert.equal(lines.filter((line) => /more lines/.test(line)).length, 1);
 		assert.ok(component.render(width).every((line: string) => visibleWidth(line) <= width));
 	}
 });
@@ -143,7 +137,7 @@ test("expanding and collapsing uses the existing expansion cap", () => {
 	component.setExpanded(false);
 	lines = visible(component);
 	assert.equal(codeLines(lines).length, 5);
-	assert.equal(outputLines(lines).length, 5);
+	assert.equal(outputLines(lines).length, 0);
 });
 
 test("codemode remains visible between adjacent tools and consecutive codemode calls", () => {
@@ -156,7 +150,8 @@ test("codemode remains visible between adjacent tools and consecutive codemode c
 	chat.addChild(first);
 	chat.addChild(second);
 	assert.deepEqual(chat.children, [read, first, second]);
-	assert.equal(outputLines(chat.render(100).map(plain)).length, 10);
+	assert.equal(codeLines(chat.render(100).map(plain)).length, 10);
+	assert.equal(outputLines(chat.render(100).map(plain)).length, 0);
 });
 
 test("Fabric gets the VS Code light/dark pair unless a preview theme is already set", () => {
@@ -334,82 +329,74 @@ test("Fabric selects its live or recorded kernel and caches identical source per
 	assert.equal(languages().length, 3);
 });
 
-test("partial updates retain the script preview and final updates reveal output", () => {
-	settings();
-	const component = row();
-	component.updateResult({ content: [], details: { calls: [{ name: "read", status: "running" }] }, isError: false }, true);
-	assert.equal(codeLines(visible(component)).length, 5);
-	assert.equal(outputLines(visible(component)).length, 0);
-	component.updateResult(result(), false);
-	assert.equal(outputLines(visible(component)).length, 5);
+test("live and replayed Codemode rows show icon-first bold names and fold only the script output", () => {
+	settings(2, { liveToolPreview: true });
+	const code = 'return "source marker";';
+	const calls = [
+		{ id: "c/1", name: "read", args: "a.txt", status: "ok" },
+		{ id: "c/2", name: "read", args: "b.txt", status: "error", error: "nested failure text" },
+		{ id: "c/3", name: "bash", status: "cancelled" },
+	];
+	const details = { calls, callPreviews: { "c/1": "legacy child output", "c/2": "nested failure text" } };
+	const component = row(code);
+	component.updateResult({ content: [{ type: "text", text: "partial script output" }], details: { ...details, calls: [{ ...calls[0], status: "running" }, calls[1]] } }, true);
+	assert.deepEqual(visible(component).slice(1), [`└ ${code}`, "… read a.txt", "✗ read b.txt"]);
+	component.updateResult(result("script output", false, details));
+	for (const expanded of [false, true, false]) {
+		component.setExpanded(expanded);
+		const lines = visible(component);
+		assert.deepEqual(lines.slice(1, 5), [`└ ${code}`, "✓ read a.txt", "✗ read b.txt", "⊘ bash"]);
+		assert.match(lines[5], /Output · Completed · 0.1s/);
+		assert.deepEqual(lines.slice(6), expanded ? ["script output"] : []);
+		const rendered = component.render(100) as string[];
+		for (const name of ["read", "bash"]) {
+			const matches = rendered.filter((line) => plain(line).includes(name));
+			assert.ok(matches.every((line) => line.includes(`\x1b[1m${name}\x1b[22m`)));
+		}
+		assert.ok(component.render(30).every((line: string) => visibleWidth(line) <= 30));
+	}
 });
 
-test("concurrent Codemode children keep their own status and preview through completion and replay", async () => {
-	settings(2);
-	const component = toolRow("codemode", { code: "" });
-	const parent = { toolName: "codemode", toolCallId: component.toolCallId };
-	const first = { id: `${parent.toolCallId}/1`, name: "read", args: "a.txt", status: "ok" };
-	const second = { id: `${parent.toolCallId}/2`, name: "read", args: "b.txt", status: "error" };
-	const third = { id: `${parent.toolCallId}/?`, name: "bash", status: "cancelled" };
-	await emit("tool_execution_start", parent);
-	const end = (id: string, text: string) => emit("tool_execution_end", { toolName: "read", toolCallId: id, parentToolCallId: parent.toolCallId, result: { content: [{ type: "text", text }] } });
-	await end(second.id, "§12§ missing b.txt");
-	component.updateResult({ content: [], details: { calls: [{ ...first, id: third.id, status: "running" }, second] } }, true);
-	assert.deepEqual(visible(component).slice(-3), ["└ read … a.txt", "└ read ✗ b.txt", "missing b.txt"]);
-	await end(first.id, "first line\nsecond line\nthird line\n" + "x".repeat(2000));
-	const original = result("script output", false, { calls: [first, second, third] });
-	const saved = await emit("tool_result", { ...parent, ...original });
-	assert.equal(saved.details.callPreviews[first.id].length, 1025);
-	assert.ok(saved.details.callPreviews[first.id].endsWith("…"));
-	assert.ok(!Object.hasOwn(original.details as object, "callPreviews"));
-	await emit("tool_execution_end", parent);
-	assert.equal(await emit("tool_result", { ...parent, ...original }), undefined);
-	const replay = row("", { ...original, ...structuredClone(saved) });
-	const compact = visible(replay);
-	assert.deepEqual(compact.slice(1, 4), ["└ read ✓ a.txt", "first line", "second line"]);
-	assert.deepEqual(compact.slice(-5), ["└ read ✗ b.txt", "missing b.txt", "└ bash ⊘", "└ Completed · 0.1s", "script output"]);
-	assert.ok(!compact.includes("third line"));
-	replay.setExpanded(true);
-	assert.ok(visible(replay).includes("third line"));
-	assert.ok(replay.render(30).every((line: string) => visibleWidth(line) <= 30));
-});
-
-test("zero preview lines keep every child status visible and old results show recorded errors", () => {
+test("zero source lines keep all nested calls visible and history errors are status-only", () => {
 	settings(0);
-	const calls = Array.from({ length: 12 }, (_, i) => ({ id: `old/${i}`, name: `tool${i}`, status: "ok" }));
-	const failed = { ...calls[1], status: "error", error: "original error" };
-	const component = row("", result("", false, { calls }));
-	component.updateResult(result("", false, { calls: [calls[0], failed, ...calls.slice(2)] }));
-	const compact = visible(component);
-	assert.equal(compact.filter((line) => /tool\d+ [✓✗]/.test(line)).length, 12);
-	assert.ok(compact.includes("└ tool1 ✗"));
-	assert.ok(!compact.includes("original error"));
-	component.setExpanded(true);
-	assert.ok(visible(component).includes("original error"));
+	const calls = Array.from({ length: 12 }, (_, i) => ({ name: `tool${i}`, status: "ok" }));
+	const component = row(script, result("", false, { calls }));
+	component.updateResult(result("", false, { calls: [calls[0], { ...calls[1], status: "error", error: "old error" }, ...calls.slice(2)] }));
+	for (const expanded of [false, true]) {
+		component.setExpanded(expanded);
+		const lines = visible(component);
+		assert.equal(lines.filter((line) => /^[✓✗] tool/.test(line)).length, 12);
+		assert.ok(lines.includes("✗ tool1"));
+		assert.ok(!lines.some((line) => line.includes("old error")));
+	}
 });
 
 test("failed and empty results retain their status; ordinary text is not stripped", () => {
 	settings();
-	const failed = visible(row("", result("Script error: broken", true)));
-	assert.ok(failed.some((line) => /Failed · 0.1s/.test(line)));
-	assert.ok(failed.some((line) => /Script error: broken/.test(line)));
+	const failed = row("", result("Script error: broken", true));
+	assert.ok(visible(failed).some((line) => /Output · Failed · 0.1s.*ctrl\+o/.test(line)));
+	assert.ok(!visible(failed).includes("Script error: broken"));
+	failed.setExpanded(true);
+	assert.ok(visible(failed).includes("Script error: broken"));
 	const empty = visible(row("", result("")));
 	assert.ok(empty.some((line) => /Completed · 0.1s/.test(line)));
-	assert.ok(!empty.some((line) => /more lines/.test(line)));
+	assert.ok(!empty.some((line) => /Output|ctrl\+o|more lines/.test(line)));
 	const ordinary = "Script completed\nWall time unknown seconds\nOutput:\nkeep this";
-	const lines = visible(row("", { content: [{ type: "text", text: ordinary }], isError: false, details: undefined }));
+	const component = row("", { content: [{ type: "text", text: ordinary }], isError: false, details: undefined });
+	component.setExpanded(true);
+	const lines = visible(component);
 	assert.ok(lines.some((line) => /Wall time unknown seconds/.test(line)));
 	assert.ok(lines.some((line) => /keep this/.test(line)));
 });
 
-test("full output paths stay visible and rendering preserves the original result", () => {
+test("full output paths expand with the script output and rendering preserves the original result", () => {
 	settings();
 	const original = result(output, false, { fullOutputPath: "/tmp/codemode-full.txt", calls: [{ name: "read", status: "ok" }] });
 	const before = structuredClone(original);
 	const component = row(script, original);
-	assert.ok(visible(component).some((line) => /Full output: \/tmp\/codemode-full.txt/.test(line)));
+	assert.ok(!visible(component).some((line) => line.includes("codemode-full.txt")));
 	component.setExpanded(true);
-	visible(component);
+	assert.ok(visible(component).some((line) => line.includes("Full output: /tmp/codemode-full.txt")));
 	assert.deepEqual(original, before);
 });
 
@@ -527,9 +514,11 @@ test("a tokenizer failure falls back to text and a later call retries", (t) => {
 });
 
 test("large completed output reuses its preview and retains only visible rendered rows", () => {
-	settings(5);
+	settings(5, { expandedPreviewMaxLines: 5 });
 	const text = Array.from({ length: 20_000 }, (_, i) => `bounded-output-${i}`).join("\n");
 	const component = row("return 1;", result(text));
+	assert.equal(component.resultRendererComponent.children.length, 1, "folded output needs only a heading");
+	component.setExpanded(true);
 	const first = component.render(100);
 	const preview = component.resultRendererComponent.children[1];
 	assert.equal(preview.toolCachedLines.length, 5, "hidden padded rows must not remain in the layout cache");

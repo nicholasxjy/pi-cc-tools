@@ -296,6 +296,14 @@ try {
 		}
 	}
 	console.log("ok image read recreates components across standalone and grouped expansion");
+
+	const script = new ToolExecutionComponent("codemode", "image-script", { code: "image(value)" }, undefined, undefined, ui, process.cwd());
+	script.updateResult(imageTool.result, false);
+	for (const expanded of [false, true, false]) {
+		script.setExpanded(expanded);
+		assert.equal(script.imageComponents.length, expanded ? 1 : 0);
+		assert.ok(script.render(80).some((line) => line.includes("Output")));
+	}
 } finally {
 	setCapabilityOverrides({ images: previousImageProtocol });
 }
@@ -307,21 +315,23 @@ try {
 			{ type: "text", text: "Script completed\nWall time 0.1 seconds\nOutput:\n" },
 			{ type: "text", text: Array.from({ length: 12 }, (_, i) => `codemode-output-${i + 1}`).join("\n") },
 		],
+		details: { calls: [{ name: "read", status: "ok", args: "a.txt" }] },
 		isError: false,
 	}, false);
 	const screen = fullscreen(component);
 	const lines = () => component.render(80).map((line) => line.replace(/\x1b\[[0-9;]*m/g, ""));
 	const outputCount = () => lines().filter((line) => line.includes("codemode-output-")).length;
-	assert.equal(outputCount(), 5);
+	assert.equal(outputCount(), 0);
+	assert.ok(lines().some((line) => line.trim() === "✓ read a.txt"));
 	for (const expanded of [true, false]) {
 		screen.frame();
-		const y = lines().findIndex((line) => line.includes("codemode-output-1"));
+		const y = lines().findIndex((line) => line.includes("Output · Completed"));
 		screen.event(0, y);
 		screen.event(0, y, true);
 		assert.equal(component.expanded, expanded, "click on codemode output toggles expansion");
-		assert.equal(outputCount(), expanded ? 12 : 5);
+		assert.equal(outputCount(), expanded ? 12 : 0);
 	}
-	console.log("ok codemode five-line preview expands and collapses through fullscreen clicks");
+	console.log("ok codemode output expands and collapses through fullscreen clicks");
 }
 
 // Keep wheel events responsive while history diff previews and assistant text update together.

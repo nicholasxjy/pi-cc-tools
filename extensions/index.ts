@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import { readFile as readFileAsync } from "node:fs/promises";
 import { basename, dirname, extname, relative, resolve } from "node:path";
-import { inspect, stripVTControlCharacters } from "node:util";
+import { stripVTControlCharacters } from "node:util";
 
 import type {
 	BashToolDetails,
@@ -158,7 +158,7 @@ interface SettingsFile {
 	searchOutputMode?: "hidden" | "count" | "preview";
 	mcpOutputMode?: "hidden" | "summary" | "preview";
 	previewLines?: number;
-	/** Visual lines shown in each collapsed codemode script/output preview. Defaults to 5; 0 hides it. */
+	/** Visual lines in collapsed Codemode source and fallback Fabric previews. Defaults to 5; 0 hides it. */
 	codemodePreviewLines?: number;
 	expandedPreviewMaxLines?: number;
 	extraExpandedPreviewMaxLines?: number;
@@ -1792,7 +1792,7 @@ function patchGlobalToolBorders(): void {
 		// Agent-family tools stay column-aligned with every other tool row — no extra
 		// leading indent (the old nested pad made Agent look offset from Read/Bash).
 		const core = textLines.map((line) => {
-			const normalized = normalizeLeadingCheckGlyph(line);
+			const normalized = this.toolName === "codemode" ? line : normalizeLeadingCheckGlyph(line);
 			return clampLineWidth(stripOuterBackgroundAnsi(normalized), width);
 		});
 		const spacerLine = " ".repeat(width);
@@ -4100,7 +4100,7 @@ function patchReadImageExpansion(): void {
 	proto.updateDisplay = function patchedReadImageUpdateDisplay(...args: any[]) {
 		const result = originalUpdateDisplay.apply(this, args);
 		const hasImage = Array.isArray(this.result?.content) && this.result.content.some((block: any) => block?.type === "image");
-		if (this.toolName === "read" && hasImage && this.expanded !== true) {
+		if ((this.toolName === "read" || this.toolName === "codemode") && hasImage && this.expanded !== true) {
 			removeImageChildren(this);
 			clearToolRenderCache(this);
 		}
@@ -7487,31 +7487,8 @@ function renderGenericToolResult(name: string, result: any, options: any, theme:
 	);
 }
 
-// Pi publishes call status in details.calls, but delivers the child output in a separate event.
-// The patched renderer survives /reload while Pi replaces the event handlers.
-const previewKey = Symbol.for("pi-claude-style-tools:codemode-call-previews");
-const codemodeCallPreviews: Map<string, Map<string, string>> = (ToolExecutionComponent as any)[previewKey] ??= new Map();
-const CODEMODE_CALL_PREVIEW_CHARS = 1024;
-
 function codemodeDisplayText(text: string): string {
 	return stripTransientMagicContextTags(stripVTControlCharacters(text)).replace(/\r\n/g, "\n").replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
-}
-
-function codemodeChildPreview(result: any): string {
-	let text = "";
-	for (const block of result?.content ?? []) {
-		const part = block?.type === "image" ? `[Image: ${block.mimeType}]` : block?.text;
-		if (typeof part !== "string" || !part) continue;
-		if (text) text += "\n";
-		text += part.slice(0, CODEMODE_CALL_PREVIEW_CHARS + 1 - text.length);
-		if (text.length > CODEMODE_CALL_PREVIEW_CHARS) break;
-	}
-	if (!text && result?.structuredContent !== undefined) {
-		text = inspect(result.structuredContent, { depth: 2, maxStringLength: 256, maxArrayLength: 10, customInspect: false });
-	}
-	const clipped = text.length > CODEMODE_CALL_PREVIEW_CHARS;
-	const preview = codemodeDisplayText(text.slice(0, CODEMODE_CALL_PREVIEW_CHARS)).trimEnd();
-	return clipped ? `${preview}…` : preview || "(no output)";
 }
 
 function codemodePreviewBlock(text: string, theme: Theme, nested: boolean): string {
@@ -7677,7 +7654,7 @@ function renderCodeCall(source: string, theme: Theme, ctx: any, label: string, l
 	return component;
 }
 
-type CodemodeCall = { id: string; name: string; args?: string; status: "ok" | "running" | "error" | "cancelled"; error?: string };
+type CodemodeCall = { name: string; args?: string; status: "ok" | "running" | "error" | "cancelled" };
 const codemodeCallStatus = {
 	ok: ["success", "✓"],
 	running: ["warning", "…"],
@@ -7685,33 +7662,28 @@ const codemodeCallStatus = {
 	cancelled: ["muted", "⊘"],
 } as const;
 
-function addCodemodeCalls(component: Container, calls: CodemodeCall[], previews: Record<string, string> | undefined, expanded: boolean, limit: number, theme: Theme, ctx: any): void {
-	const live = codemodeCallPreviews.get(ctx.toolCallId);
+function addCodemodeCalls(component: Container, calls: CodemodeCall[], expanded: boolean, theme: Theme): void {
 	for (const call of calls) {
 		if (!call || typeof call.name !== "string") continue;
 		const [color, icon] = codemodeCallStatus[call.status] ?? ["muted", "?"];
 		const args = typeof call.args === "string" ? codemodeDisplayText(call.args) : "";
-		const name = theme.fg("toolTitle", codemodeDisplayText(call.name));
+		const name = theme.fg("toolTitle", theme.bold(codemodeDisplayText(call.name)));
 		const summary = args ? ` ${theme.fg("muted", expanded ? args : summarizeText(args, 80))}` : "";
-		component.addChild(makeText(undefined, branchLead(`${name} ${theme.fg(color, icon)}${summary}`, false, theme)));
-		const preview = previews?.[call.id] ?? live?.get(call.id) ?? call.error;
-		if (limit && typeof preview === "string" && preview) {
-			component.addChild(new CodemodePreview(theme.fg(call.status === "error" ? "error" : "dim", codemodeDisplayText(preview)), expanded, theme, true));
-		}
+		component.addChild(makeText(undefined, branchIndent(`${theme.fg(color, icon)} ${name}${summary}`, false, theme)));
 	}
 }
 
 function renderCodemodeResult(toolName: string, result: any, options: any, theme: Theme, ctx: any): Container | Text {
-	const calls = toolName === "codemode" && Array.isArray(result.details?.calls) ? result.details.calls : undefined;
-	const previews = result.details?.callPreviews;
-	const limit = options.expanded ? expandedPreviewLimit() : codemodePreviewLimit();
+	const isCodemode = toolName === "codemode";
+	const calls = isCodemode && Array.isArray(result.details?.calls) ? result.details.calls : undefined;
+	const folded = isCodemode && !options.expanded;
 	if (options.isPartial) {
 		delete ctx.state._codemodeResult;
-		const running = runningPreviewBlock(result, "", !!options.expanded, theme, ctx);
+		const running = runningPreviewBlock(result, "", !!options.expanded, theme, ctx, folded ? { lines: [] } : undefined);
 		if (!calls?.length) return makeText(ctx.lastComponent, running);
 		const component = ctx.lastComponent instanceof Container ? ctx.lastComponent : new Container();
 		component.clear();
-		addCodemodeCalls(component, calls, previews, !!options.expanded, limit, theme, ctx);
+		addCodemodeCalls(component, calls, !!options.expanded, theme);
 		if (running) component.addChild(makeText(undefined, running));
 		return component;
 	}
@@ -7719,30 +7691,33 @@ function renderCodemodeResult(toolName: string, result: any, options: any, theme
 	const isError = ctx.isError;
 	setToolStatus(ctx, isError ? "error" : "success");
 	const raw = getTextContent(result).replace(/\r\n/g, "\n");
+	const hasImage = isCodemode && result.content?.some((block: any) => block?.type === "image");
+	const limit = options.expanded ? expandedPreviewLimit() : codemodePreviewLimit();
 	const cached = ctx.state._codemodeResult;
 	if (cached && cached.component === ctx.lastComponent && cached.raw === raw
 		&& cached.expanded === !!options.expanded && cached.limit === limit
 		&& cached.extra === extraToolOutputExpanded && cached.isError === isError
-		&& cached.calls === calls && cached.previews === previews && cached.path === result.details?.fullOutputPath
+		&& cached.calls === calls && cached.hasImage === hasImage && cached.path === result.details?.fullOutputPath
 		&& cached.epoch === _toolBranchVisualEpoch) return cached.component;
-	const header = toolName === "codemode" ? /^Script (completed|failed)\nWall time ([\d.]+) seconds\nOutput:\n/.exec(raw) : null;
-	const output = toolName === "fabric_exec" ? raw.trimEnd() : (header ? raw.slice(header[0].length) : raw).trim();
+	const header = isCodemode ? /^Script (completed|failed)\nWall time ([\d.]+) seconds\nOutput:\n/.exec(raw) : null;
+	const output = isCodemode ? (header ? raw.slice(header[0].length) : raw).trim() : raw.trimEnd();
 	const status = isError || header?.[1] === "failed" ? "Failed" : header ? "Completed" : "Done";
-	const hiddenPreview = limit === 0 && (output || calls?.some((call: CodemodeCall) => call?.error || previews?.[call?.id]));
-	const summary = `${status}${header ? ` · ${header[2]}s` : ""}${hiddenPreview ? toolOutputDetailHint(theme, false) : ""}`;
+	const hasCodemodeOutput = isCodemode && (output || hasImage || result.details?.fullOutputPath);
+	const hiddenOutput = folded ? hasCodemodeOutput : output && limit === 0;
+	const summary = `${hasCodemodeOutput ? "Output · " : ""}${status}${header ? ` · ${header[2]}s` : ""}${hiddenOutput ? toolOutputDetailHint(theme, false) : ""}`;
 	const component = ctx.lastComponent instanceof Container ? ctx.lastComponent : new Container();
 	component.clear();
-	if (calls?.length) addCodemodeCalls(component, calls, previews, !!options.expanded, limit, theme, ctx);
+	if (calls?.length) addCodemodeCalls(component, calls, !!options.expanded, theme);
 	component.addChild(makeText(undefined, withBranch(theme.fg(isError ? "error" : "muted", summary), theme)));
-	if (output && limit > 0) {
+	if (!folded && output && limit > 0) {
 		const styled = output.split("\n").map((line) => theme.fg(isError ? "error" : "dim", line || " ")).join("\n");
-		component.addChild(new CodemodePreview(styled, !!options.expanded, theme, !!calls?.length));
+		component.addChild(new CodemodePreview(styled, !!options.expanded, theme, isCodemode));
 	}
-	if (typeof result.details?.fullOutputPath === "string") {
+	if (!folded && typeof result.details?.fullOutputPath === "string") {
 		component.addChild(makeText(undefined, withBranch(theme.fg("muted", `Full output: ${result.details.fullOutputPath}`), theme)));
 	}
 	ctx.state._codemodeResult = { raw, expanded: !!options.expanded, limit, extra: extraToolOutputExpanded,
-		isError, calls, previews, path: result.details?.fullOutputPath,
+		isError, calls, hasImage, path: result.details?.fullOutputPath,
 		epoch: _toolBranchVisualEpoch, component };
 	return component;
 }
@@ -9300,7 +9275,6 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_execution_start", async (event) => {
-		if (event.toolName === "codemode") codemodeCallPreviews.set(event.toolCallId, new Map());
 		clearPreservedBashPreviews();
 		const toolName = (event as any)?.toolName;
 		if (toolName !== "bash") return;
@@ -10036,18 +10010,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("tool_execution_start", async () => { markBlinkActivity(); });
 	// Partial tool output is the main long-running signal (bash streams for minutes).
 	pi.on("tool_execution_update", async () => { markBlinkActivity(); });
-	pi.on("tool_execution_end", async (event) => {
-		markBlinkActivity();
-		if ("parentToolCallId" in event && typeof event.parentToolCallId === "string") {
-			codemodeCallPreviews.get(event.parentToolCallId)?.set(event.toolCallId, codemodeChildPreview(event.result));
-		}
-		if (event.toolName === "codemode") codemodeCallPreviews.delete(event.toolCallId);
-	});
-	pi.on("tool_result", (event) => {
-		if (event.toolName !== "codemode") return;
-		const previews = codemodeCallPreviews.get(event.toolCallId);
-		if (previews?.size) return { details: { ...event.details as object, callPreviews: Object.fromEntries(previews) } };
-	});
+	pi.on("tool_execution_end", async () => { markBlinkActivity(); });
 	// agent_end fires when a low-level run finishes (tools for that assistant message
 	// are done). registerThinkingLabels clears currentAgentWorkStartMs on the same
 	// event; defer so we only wipe blink state once the work marker is gone.
@@ -10069,7 +10032,6 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_shutdown", async () => {
 		_clearAllBlinkContexts();
 		clearAllBashDurationContexts();
-		codemodeCallPreviews.clear();
 		clearRtkRewriteState();
 		WRITE_EXISTED_BEFORE.clear();
 		EDIT_LOCALIZED.clear();
