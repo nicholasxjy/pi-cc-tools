@@ -29,10 +29,17 @@ const { Container, Text, visibleWidth } = await import("@earendil-works/pi-tui")
 const { getThemeByName, initTheme, setTheme, setThemeInstance } = await import("../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js");
 initTheme("dark", false);
 const tools = new Map<string, any>();
+const hooks = new Map<string, Function[]>();
+async function emit(type: string, event: object) {
+	let result;
+	for (const handler of hooks.get(type) ?? []) result = await handler({ type, ...event }) ?? result;
+	return result;
+}
 const previousPreviewTheme = process.env.CODE_PREVIEW_THEME;
 (await import("../extensions/index.ts")).default({
 	registerTool: (tool: any) => tools.set(tool.name, tool),
-	registerCommand() {}, registerShortcut() {}, on() {},
+	registerCommand() {}, registerShortcut() {},
+	on(type: string, handler: Function) { hooks.set(type, [...hooks.get(type) ?? [], handler]); },
 	getThinkingLevel: () => "off", getAllTools: () => [...tools.values()],
 } as any);
 
@@ -335,6 +342,50 @@ test("partial updates retain the script preview and final updates reveal output"
 	assert.equal(outputLines(visible(component)).length, 0);
 	component.updateResult(result(), false);
 	assert.equal(outputLines(visible(component)).length, 5);
+});
+
+test("concurrent Codemode children keep their own status and preview through completion and replay", async () => {
+	settings(2);
+	const component = toolRow("codemode", { code: "" });
+	const parent = { toolName: "codemode", toolCallId: component.toolCallId };
+	const first = { id: `${parent.toolCallId}/1`, name: "read", args: "a.txt", status: "ok" };
+	const second = { id: `${parent.toolCallId}/2`, name: "read", args: "b.txt", status: "error" };
+	const third = { id: `${parent.toolCallId}/?`, name: "bash", status: "cancelled" };
+	await emit("tool_execution_start", parent);
+	const end = (id: string, text: string) => emit("tool_execution_end", { toolName: "read", toolCallId: id, parentToolCallId: parent.toolCallId, result: { content: [{ type: "text", text }] } });
+	await end(second.id, "§12§ missing b.txt");
+	component.updateResult({ content: [], details: { calls: [{ ...first, id: third.id, status: "running" }, second] } }, true);
+	assert.deepEqual(visible(component).slice(-3), ["└ read … a.txt", "└ read ✗ b.txt", "missing b.txt"]);
+	await end(first.id, "first line\nsecond line\nthird line\n" + "x".repeat(2000));
+	const original = result("script output", false, { calls: [first, second, third] });
+	const saved = await emit("tool_result", { ...parent, ...original });
+	assert.equal(saved.details.callPreviews[first.id].length, 1025);
+	assert.ok(saved.details.callPreviews[first.id].endsWith("…"));
+	assert.ok(!Object.hasOwn(original.details as object, "callPreviews"));
+	await emit("tool_execution_end", parent);
+	assert.equal(await emit("tool_result", { ...parent, ...original }), undefined);
+	const replay = row("", { ...original, ...structuredClone(saved) });
+	const compact = visible(replay);
+	assert.deepEqual(compact.slice(1, 4), ["└ read ✓ a.txt", "first line", "second line"]);
+	assert.deepEqual(compact.slice(-5), ["└ read ✗ b.txt", "missing b.txt", "└ bash ⊘", "└ Completed · 0.1s", "script output"]);
+	assert.ok(!compact.includes("third line"));
+	replay.setExpanded(true);
+	assert.ok(visible(replay).includes("third line"));
+	assert.ok(replay.render(30).every((line: string) => visibleWidth(line) <= 30));
+});
+
+test("zero preview lines keep every child status visible and old results show recorded errors", () => {
+	settings(0);
+	const calls = Array.from({ length: 12 }, (_, i) => ({ id: `old/${i}`, name: `tool${i}`, status: "ok" }));
+	const failed = { ...calls[1], status: "error", error: "original error" };
+	const component = row("", result("", false, { calls }));
+	component.updateResult(result("", false, { calls: [calls[0], failed, ...calls.slice(2)] }));
+	const compact = visible(component);
+	assert.equal(compact.filter((line) => /tool\d+ [✓✗]/.test(line)).length, 12);
+	assert.ok(compact.includes("└ tool1 ✗"));
+	assert.ok(!compact.includes("original error"));
+	component.setExpanded(true);
+	assert.ok(visible(component).includes("original error"));
 });
 
 test("failed and empty results retain their status; ordinary text is not stripped", () => {

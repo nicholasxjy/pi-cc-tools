@@ -138,7 +138,7 @@ Settings are read from `.pi/settings.json` in the project and from the agent set
 
 The screenshots on this page use `"toolBackground": "transparent"`.
 
-Codemode stays outside tool groups so its previews remain visible. The script and its output each get their own `codemodePreviewLines` budget, counted after wrapping to the terminal width. Headings, status and truncation hints are extra. Click or press `Ctrl+O` to expand using the existing expanded preview limits. After editing this setting, run `/reload`.
+Codemode stays outside tool groups so its previews remain visible. Each nested call appears in invocation order with its arguments and status (… running, ✓ succeeded, ✗ failed, ⊘ cancelled). As a tool finishes, its output preview appears beneath it. New session results keep up to 1,024 characters per tool preview for replay. Earlier results show the statuses and errors Pi recorded. The script, each tool preview and the script output each get their own `codemodePreviewLines` budget, counted after wrapping to the terminal width. Headings, status and truncation hints are extra. Click or press `Ctrl+O` to expand using the existing expanded preview limits. After editing this setting, run `/reload`.
 
 The `fabric_exec` tool from [pi-fabric](https://github.com/fabric-runtime/pi-fabric) gets a standalone row with the same status dot and result indentation as other tools. Fabric’s compact view shows the run title, objective and nested tool activity. Click or press `Ctrl+O` to see the full transcript, including the program and available tool previews. The program uses TypeScript or Python syntax colors and has no line-number gutter. Fabric’s `ui.toolDisplay` controls its collapsed view. Load this extension before Fabric to use VS Code Light+ and Dark+ for Fabric edit diffs and code previews as pi switches modes. An explicit `CODE_PREVIEW_THEME` or Fabric `codePreview.shikiTheme` takes precedence. When a session has no Fabric renderer available, the row uses `codemodePreviewLines` for its script and output previews.
 
@@ -153,7 +153,7 @@ Codemode scripts use pi's built-in JavaScript syntax highlighting. Each streamed
 | `thinkingMode` | `live` | `live` collapses finished thinking to `Thought for Xs`, `full` keeps it expanded, `latest` hides it in all but the latest message |
 | `terminalTitle` | `true` | Show the latest execution step, the completed task summary, and the completion notification in interactive sessions. Run `/reload` after editing |
 | `previewLines` | `8` | Lines in a collapsed preview |
-| `codemodePreviewLines` | `5` | Visible terminal lines in each collapsed Codemode script and output preview. Set `0` to hide both previews. The setting accepts non-negative integers and defaults to `5` for invalid values. |
+| `codemodePreviewLines` | `5` | Visible terminal lines in each collapsed Codemode script, child tool and script output preview. Set `0` to show only headings and statuses. The setting accepts non-negative integers and defaults to `5` for invalid values. |
 | `expandedPreviewMaxLines` | `4000` | Line limit when a row is expanded |
 | `extraExpandedPreviewMaxLines` | `12000` | Line limit in `Ctrl+Shift+O` mode |
 | `extraToolOutputExpanded` | `false` | Start in `Ctrl+Shift+O` mode |
