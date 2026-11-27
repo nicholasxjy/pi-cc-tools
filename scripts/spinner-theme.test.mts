@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { register } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -92,4 +92,40 @@ test("the spinner glyph and verb use Claude orange with adaptive colors off", as
 	await fire("turn_start");
 	assert.equal(verbColor(), themeModule.theme.getFgAnsi("borderAccent"));
 	assert.ok(spinnerFrame().includes(`${themeModule.theme.getFgAnsi("accent")}·`));
+});
+
+test("spinner glyph and verb both follow the active session ctx.cwd settings consistently", async () => {
+	const orange = "\x1b[38;2;215;119;87m";
+	const launchCwd = mkdtempSync(join(tmpdir(), "spinner-launch-cwd-"));
+	const sessionCwd = mkdtempSync(join(tmpdir(), "spinner-session-cwd-"));
+	const prevCwd = process.cwd();
+	mkdirSync(join(launchCwd, ".pi"), { recursive: true });
+	mkdirSync(join(sessionCwd, ".pi"), { recursive: true });
+	const bustKey = Symbol.for("pi-claude-style-tools:spinner-settings-bust");
+	try {
+		// Launch dir says adaptive=false; resumed session project says adaptive=true.
+		writeFileSync(join(launchCwd, ".pi", "settings.json"), JSON.stringify({ themeAdaptive: false }));
+		writeFileSync(join(sessionCwd, ".pi", "settings.json"), JSON.stringify({ themeAdaptive: true }));
+		process.chdir(launchCwd);
+		themeModule.setTheme("dark", false);
+		(globalThis as any)[bustKey] = ((globalThis as any)[bustKey] ?? 0) + 1;
+
+		const sessionCtx = { ...ctx, cwd: sessionCwd };
+		for (const handler of handlers.get("session_start") ?? []) await handler({ reason: "resume" }, sessionCtx);
+		for (const handler of handlers.get("turn_start") ?? []) await handler({}, sessionCtx);
+		assert.equal(verbColor(), themeModule.theme.getFgAnsi("borderAccent"));
+		assert.ok(spinnerFrame().includes(`${themeModule.theme.getFgAnsi("accent")}·`), "glyph follows ctx.cwd adaptive=true");
+
+		// Flip: launch dir adaptive=true, session project adaptive=false.
+		writeFileSync(join(launchCwd, ".pi", "settings.json"), JSON.stringify({ themeAdaptive: true }));
+		writeFileSync(join(sessionCwd, ".pi", "settings.json"), JSON.stringify({ themeAdaptive: false }));
+		(globalThis as any)[bustKey]++;
+		for (const handler of handlers.get("turn_start") ?? []) await handler({}, sessionCtx);
+		assert.equal(verbColor(), orange);
+		assert.ok(spinnerFrame().includes(`${orange}·`), "glyph follows ctx.cwd adaptive=false");
+	} finally {
+		process.chdir(prevCwd);
+		rmSync(launchCwd, { recursive: true, force: true });
+		rmSync(sessionCwd, { recursive: true, force: true });
+	}
 });

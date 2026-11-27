@@ -24,52 +24,70 @@ const RESET = "\x1b[0m";
 let CLAUDE_ORANGE = "\x1b[38;2;215;119;87m";
 let STATUS_DIM = "\x1b[38;2;153;153;153m";
 
+interface SpinnerSettings {
+	adaptive: boolean;
+	verbColor: string;
+	statusColor: string;
+	terminalTitle: boolean;
+}
+
 // Short TTL so /cc-spinner changes are picked up within ~1s without
-// re-reading the file on every spinner tick (~170ms).
-let _spinnerSettingsCache: { cwd: string; value: { adaptive: boolean; verbColor: string; statusColor: string; terminalTitle: boolean }; expires: number } | null = null;
+// re-reading the file on every spinner tick (~170ms). Keyed by cwd so
+// terminal-title and Loader never thrash across directories.
+const _spinnerSettingsCache = new Map<string, { value: SpinnerSettings; expires: number }>();
 const SPINNER_SETTINGS_TTL_MS = 1_000;
+const SPINNER_SETTINGS_CACHE_LIMIT = 16;
 // Cross-extension bust signal: /cc-spinner in index.ts bumps this counter
 // and we drop the cache when it changes.
 const SPINNER_BUST_KEY = Symbol.for("pi-claude-style-tools:spinner-settings-bust");
 let _spinnerLastBust = 0;
 
-function readSpinnerSettings(cwd = process.cwd()): { adaptive: boolean; verbColor: string; statusColor: string; terminalTitle: boolean } {
+let activeSettingsCwd: string | undefined;
+
+function readSpinnerSettings(cwd = activeSettingsCwd || process.cwd()): SpinnerSettings {
 	const now = Date.now();
 	const bust = ((globalThis as any)[SPINNER_BUST_KEY] as number | undefined) ?? 0;
 	if (bust !== _spinnerLastBust) {
 		_spinnerLastBust = bust;
-		_spinnerSettingsCache = null;
+		_spinnerSettingsCache.clear();
 	}
-	if (_spinnerSettingsCache?.cwd === cwd && _spinnerSettingsCache.expires > now) {
-		return _spinnerSettingsCache.value;
+	const cached = _spinnerSettingsCache.get(cwd);
+	if (cached && cached.expires > now) {
+		return cached.value;
 	}
 	let adaptive = true;
-	let terminalTitle: boolean | undefined;
+	let terminalTitle = true;
 	// With adaptive colors on, the glyph uses pi's accent. Use borderAccent for the verb so it
 	// feels themed and lively without collapsing into the exact same Claude
 	// orange as the glyph on themes like openAntigravity-dark.
 	let verbColor = "borderAccent";
 	let statusColor = "muted";
-	const paths = [join(cwd, ".pi", "settings.json"), getUserSettingsPath()];
+	const paths = [getUserSettingsPath(), join(cwd, ".pi", "settings.json")];
 	for (const p of paths) {
 		try {
 			if (!p || !existsSync(p)) continue;
 			const raw = JSON.parse(readFileSync(p, "utf8"));
-			if (raw && typeof raw === "object") {
-				if (raw.themeAdaptive === false) adaptive = false;
-				if (typeof raw.terminalTitle === "boolean") terminalTitle ??= raw.terminalTitle;
+			if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+				if (typeof raw.themeAdaptive === "boolean") adaptive = raw.themeAdaptive;
+				if (typeof raw.terminalTitle === "boolean") terminalTitle = raw.terminalTitle;
 				if (typeof raw.spinnerVerbColor === "string" && raw.spinnerVerbColor.length > 0) verbColor = raw.spinnerVerbColor;
 				if (typeof raw.spinnerStatusColor === "string" && raw.spinnerStatusColor.length > 0) statusColor = raw.spinnerStatusColor;
 			}
 		} catch { /* ignore */ }
 	}
-	const value = { adaptive, verbColor, statusColor, terminalTitle: terminalTitle ?? true };
-	_spinnerSettingsCache = { cwd, value, expires: now + SPINNER_SETTINGS_TTL_MS };
+	const value: SpinnerSettings = { adaptive, verbColor, statusColor, terminalTitle };
+	_spinnerSettingsCache.delete(cwd);
+	_spinnerSettingsCache.set(cwd, { value, expires: now + SPINNER_SETTINGS_TTL_MS });
+	while (_spinnerSettingsCache.size > SPINNER_SETTINGS_CACHE_LIMIT) {
+		const oldest = _spinnerSettingsCache.keys().next().value;
+		if (oldest === undefined) break;
+		_spinnerSettingsCache.delete(oldest);
+	}
 	return value;
 }
 
-function themeAdaptiveEnabled(): boolean {
-	return readSpinnerSettings().adaptive;
+function themeAdaptiveEnabled(cwd = activeSettingsCwd || process.cwd()): boolean {
+	return readSpinnerSettings(cwd).adaptive;
 }
 
 // Original Claude-style values restored when the user turns adaptive off.
@@ -95,8 +113,9 @@ function resolveThemeColor(theme: any, key: string, fallbackKey: string): string
 	return null;
 }
 
-function applyThemeColors(theme: any): void {
-	const { adaptive, verbColor, statusColor } = readSpinnerSettings();
+function applyThemeColors(theme: any, cwd?: string): void {
+	if (cwd) activeSettingsCwd = cwd;
+	const { adaptive, verbColor, statusColor } = readSpinnerSettings(cwd || activeSettingsCwd || process.cwd());
 
 	// Respond to runtime toggles (themeAdaptive or spinner color key changes)
 	// without restarting pi.
@@ -165,7 +184,7 @@ function stopLoaderIfUiStopped(loader: any): boolean {
 	const message = typeof this.message === "string" && RAW_ANSI_RE.test(this.message)
 		? this.message
 		: this.messageColorFn(this.message);
-	const spinner = themeAdaptiveEnabled() ? this.spinnerColorFn(frame) : `${_DEFAULT_CLAUDE_ORANGE}${frame}${RESET}`;
+	const spinner = themeAdaptiveEnabled(activeSettingsCwd) ? this.spinnerColorFn(frame) : `${_DEFAULT_CLAUDE_ORANGE}${frame}${RESET}`;
 	const nextText = `${spinner} ${message}`;
 	if ((this as any)[LOADER_LAST_TEXT] === nextText) return;
 	(this as any)[LOADER_LAST_TEXT] = nextText;
@@ -824,7 +843,7 @@ export default function (pi: ExtensionAPI) {
 	let activeTurnId = 0;
 	let turnActive = false;
 	let lastWorkingMessage: string | null = null;
-	let activeCtx: { ui: any; hasUI: boolean; mode?: string } | null = null;
+	let activeCtx: { ui: any; hasUI: boolean; mode?: string; cwd?: string } | null = null;
 	// Tools running right now, in start order; the latest one names the working line.
 	const runningTools = new Map<string, { name: string; args: unknown }>();
 	// Root interactive session only — nested/non-UI contexts must not fight
@@ -935,7 +954,7 @@ export default function (pi: ExtensionAPI) {
 		// Re-derive colors on every tick so /cc-spinner verb/status changes
 		// take effect within ~250 ms without waiting for the next pi event.
 		// applyThemeColors only re-resolves two theme colors, so this is cheap.
-		applyThemeColors(activeCtx.ui?.theme);
+		applyThemeColors(activeCtx.ui?.theme, activeCtx.cwd);
 		const nextMessage = buildWorkingMessage();
 		if (!force && nextMessage === lastWorkingMessage) return;
 		lastWorkingMessage = nextMessage;
@@ -1070,6 +1089,8 @@ export default function (pi: ExtensionAPI) {
 
 	// session_start: claim root UI session + announce native session identity.
 	pi.on("session_start", async (event, ctx) => {
+		if (ctx?.cwd) activeSettingsCwd = ctx.cwd;
+		if (ctx?.ui?.theme) applyThemeColors(ctx.ui.theme, ctx.cwd);
 		if (!herdrEnabled()) return;
 		if (ctx?.hasUI !== true) return;
 		herdrRootSession = true;
@@ -1108,7 +1129,7 @@ export default function (pi: ExtensionAPI) {
 		activeTurnId++;
 		turnActive = true;
 		activeCtx = ctx;
-		applyThemeColors(ctx.ui?.theme);
+		applyThemeColors(ctx.ui?.theme, ctx.cwd);
 		turnStartTime = Date.now();
 		beginRun(turnStartTime);
 		currentVerb = pickVerb();
@@ -1128,7 +1149,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("message_update", async (event, ctx) => {
 		activeCtx = ctx;
-		applyThemeColors(ctx.ui?.theme);
+		if (ctx?.cwd) activeSettingsCwd = ctx.cwd;
 		const evt = event.assistantMessageEvent;
 		let statusChanged = false;
 		const previousTokenCount = outputTokenCount();
@@ -1163,7 +1184,10 @@ export default function (pi: ExtensionAPI) {
 			animateTokens();
 			// Same-frame ordering: ensure footer updates even if pi rendered first.
 			if (hasWorkingUi()) {
-				const timer = setTimeout(() => syncWorkingMessage(true), 0);
+				const turnId = activeTurnId;
+				const timer = setTimeout(() => {
+					if (turnActive && activeTurnId === turnId) syncWorkingMessage(true);
+				}, 0);
 				unrefTimer(timer);
 			}
 			return;
@@ -1188,6 +1212,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("tool_execution_start", async (event: any, ctx) => {
 		if (typeof event?.toolCallId !== "string") return;
 		activeCtx = ctx;
+		if (ctx?.cwd) activeSettingsCwd = ctx.cwd;
 		runningTools.set(event.toolCallId, { name: String(event.toolName ?? ""), args: event.args });
 		if (turnActive) syncWorkingMessage(true);
 	});
@@ -1195,13 +1220,14 @@ export default function (pi: ExtensionAPI) {
 	pi.on("tool_execution_end", async (event: any, ctx) => {
 		if (typeof event?.toolCallId !== "string" || !runningTools.delete(event.toolCallId)) return;
 		activeCtx = ctx;
+		if (ctx?.cwd) activeSettingsCwd = ctx.cwd;
 		if (turnActive) syncWorkingMessage(true);
 	});
 
 	pi.on("turn_end", async (_event, ctx) => {
 		turnActive = false;
 		activeCtx = ctx;
-		applyThemeColors(ctx.ui?.theme);
+		applyThemeColors(ctx.ui?.theme, ctx.cwd);
 		const turnId = activeTurnId;
 		const elapsed = Date.now() - (agentStartTime || turnStartTime);
 		stopRefreshLoop();
@@ -1266,5 +1292,6 @@ export default function (pi: ExtensionAPI) {
 		herdrMarkIdle(undefined, true);
 		herdrRootSession = false;
 		activeCtx = null;
+		activeSettingsCwd = undefined;
 	});
 }

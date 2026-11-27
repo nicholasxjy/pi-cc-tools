@@ -7,14 +7,18 @@ export * from "@earendil-works/pi-coding-agent";
 
 const received = (globalThis.__piToolCtxReceived ??= new Map());
 export const outputSchemas = new Map();
+const fallbackOutputSchemas = new Map([
+	["read", { type: "object" }],
+	["bash", { type: "object" }],
+]);
 
 function recording(name, factory) {
 	return (...factoryArgs) => {
 		const definition = factory(...factoryArgs);
 		if (name === "read" || name === "bash") {
-			// The test dependency predates structured tool outputs.
-			definition.outputSchema ??= { type: "object" };
-			outputSchemas.set(name, definition.outputSchema);
+			// The test dependency predates structured tool outputs; reuse one schema per tool across cwds.
+			definition.outputSchema ??= fallbackOutputSchemas.get(name);
+			if (!outputSchemas.has(name)) outputSchemas.set(name, definition.outputSchema);
 		}
 		return {
 			...definition,

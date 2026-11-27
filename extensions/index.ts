@@ -1,6 +1,19 @@
-import { existsSync, readFileSync, statSync, writeFileSync, mkdirSync } from "node:fs";
+import {
+	chmodSync,
+	existsSync,
+	lstatSync,
+	mkdirSync,
+	readFileSync,
+	readlinkSync,
+	realpathSync,
+	renameSync,
+	statSync,
+	unlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { readFile as readFileAsync } from "node:fs/promises";
-import { basename, dirname, extname, relative, resolve } from "node:path";
+import { homedir } from "node:os";
+import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 
 import type {
@@ -79,6 +92,7 @@ import {
 	BASH_INTENT_MODES,
 	cleanIntentLabel,
 	configureLocalIntents,
+	flushLocalIntentCache,
 	localIntentFor,
 	localIntentUnsupportedReason,
 	normalizeBashIntentMode,
@@ -166,20 +180,19 @@ interface SettingsFile {
 	groupToolCalls?: boolean;
 	bashOutputMode?: "opencode" | "summary" | "preview";
 	/**
-	 * Short purpose labels on bash rows. `off` (default); `model`: the model writes them as an
+	 * Short purpose labels on bash rows. `model` (default): the model writes them as an
 	 * extra bash argument (changes the bash tool and the model's instructions; `true` means this);
 	 * `local`: Apple's on-device model writes them on this Mac, without changing anything the model
-	 * sees. Applied when the extension loads (pi start or /reload).
+	 * sees; `off`: plain commands. Applied when the extension loads (pi start or /reload).
 	 */
 	bashIntent?: boolean | "off" | "model" | "local";
 	bashCollapsedLines?: number;
-	/** Verbatim script lines shown while bash is running or after failure. Defaults to 8. */
+	/** Verbatim script lines shown while bash is running or after failure. Defaults to 0. */
 	bashCommandPreviewLines?: number;
-	/** Show a small live output preview while tools are still running. Defaults to true. */
+	/** Show a small live output preview while tools are still running. Defaults to false. */
 	liveToolPreview?: boolean;
 	/** Number of live output lines to show while collapsed. Defaults to 5. */
 	liveToolPreviewLines?: number;
-	showTruncationHints?: boolean;
 	diffCollapsedLines?: number;
 	/** Diff layout: "auto" (default) picks split only when it fits cleanly; "split" and "unified" force one layout. */
 	diffLayout?: "auto" | "split" | "unified";
@@ -227,27 +240,58 @@ interface SettingsFile {
 	thinkingMode?: "live" | "full" | "latest";
 }
 
-let _settingsCache: { value: SettingsFile; timestamp: number } | null = null;
+const _settingsCache = new Map<string, { value: SettingsFile; timestamp: number }>();
 const SETTINGS_CACHE_TTL_MS = 5_000;
+const SETTINGS_CACHE_LIMIT = 16;
+let activeSettingsCwd: string | undefined;
 
-function readSettings(): SettingsFile {
-	const now = Date.now();
-	if (_settingsCache && now - _settingsCache.timestamp < SETTINGS_CACHE_TTL_MS) {
-		return _settingsCache.value;
-	}
-	const cwdPath = `${process.cwd()}/.pi/settings.json`;
-	const homePath = getUserSettingsPath();
-	const merged: SettingsFile = {};
-	for (const path of [cwdPath, homePath]) {
-		try {
-			if (!path || !existsSync(path)) continue;
-			const raw = JSON.parse(readFileSync(path, "utf8"));
-			if (raw && typeof raw === "object") Object.assign(merged, raw as SettingsFile);
-		} catch {
-			// ignore invalid settings files
+function effectiveSettingsCwd(cwd?: string): string {
+	return cwd || activeSettingsCwd || process.cwd();
+}
+
+function getProjectSettingsPath(cwd?: string): string {
+	return join(effectiveSettingsCwd(cwd), ".pi", "settings.json");
+}
+
+function readSettingsObject(path: string): Record<string, unknown> | null {
+	try {
+		if (!path || !existsSync(path)) return null;
+		const raw = JSON.parse(readFileSync(path, "utf8"));
+		if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+			return raw as Record<string, unknown>;
 		}
+	} catch {
+		// ignore invalid settings files
 	}
-	_settingsCache = { value: merged, timestamp: now };
+	return null;
+}
+
+function hasProjectSettingKey(key: string, cwd?: string): boolean {
+	const raw = readSettingsObject(getProjectSettingsPath(cwd));
+	return !!raw && Object.prototype.hasOwnProperty.call(raw, key);
+}
+
+function readSettings(cwd?: string): SettingsFile {
+	const baseCwd = effectiveSettingsCwd(cwd);
+	const now = Date.now();
+	const cached = _settingsCache.get(baseCwd);
+	if (cached && now - cached.timestamp < SETTINGS_CACHE_TTL_MS) {
+		return cached.value;
+	}
+	const homePath = getUserSettingsPath();
+	const cwdPath = getProjectSettingsPath(baseCwd);
+	const merged: SettingsFile = {};
+	for (const path of [homePath, cwdPath]) {
+		const raw = readSettingsObject(path);
+		if (raw) Object.assign(merged, raw as SettingsFile);
+	}
+	_settingsCache.delete(baseCwd);
+	_settingsCache.set(baseCwd, { value: merged, timestamp: now });
+	while (_settingsCache.size > SETTINGS_CACHE_LIMIT) {
+		const oldest = _settingsCache.keys().next().value;
+		if (oldest === undefined) break;
+		_settingsCache.delete(oldest);
+	}
 	return merged;
 }
 
@@ -261,47 +305,125 @@ function bustSpinnerSettingsCache(): void {
 	(globalThis as any)[SPINNER_BUST_KEY] = current + 1;
 }
 
-function writeSettingsKey(key: string, value: unknown): void {
-	_settingsCache = null; // invalidate cache on write
-	const path = getUserSettingsPath();
-	const dir = dirname(path);
-	let settings: Record<string, unknown> = {};
+function resolveWritableSettingsTarget(settingsPath: string): string {
+	let current = settingsPath;
+	for (let hop = 0; hop < 16; hop++) {
+		let st;
+		try {
+			st = lstatSync(current);
+		} catch {
+			return current;
+		}
+		if (!st.isSymbolicLink()) return current;
+		try {
+			return realpathSync(current);
+		} catch {
+			const linkTarget = readlinkSync(current);
+			current = resolve(dirname(current), linkTarget);
+		}
+	}
+	return current;
+}
+
+interface WriteSettingsResult {
+	ok: boolean;
+	scope: "user" | "project";
+	path: string;
+}
+
+function writeSettingsKey(
+	key: string,
+	value: unknown,
+	options?: { cwd?: string; scope?: "user" | "project" | "effective" },
+): WriteSettingsResult {
+	const targetCwd = effectiveSettingsCwd(options?.cwd);
+	const scopeMode = options?.scope ?? "effective";
+	const useProject = scopeMode === "project" || (scopeMode === "effective" && hasProjectSettingKey(key, targetCwd));
+	const scope: "user" | "project" = useProject ? "project" : "user";
+	const settingsPath = useProject ? getProjectSettingsPath(targetCwd) : getUserSettingsPath();
+	const targetPath = resolveWritableSettingsTarget(settingsPath);
+	const dir = dirname(targetPath);
+
+	let existingMode: number | undefined;
 	try {
-		if (existsSync(path)) settings = JSON.parse(readFileSync(path, "utf8")) ?? {};
-	} catch { /* start fresh */ }
+		existingMode = statSync(targetPath).mode & 0o7777;
+	} catch { /* new file */ }
+
+	const settings: Record<string, unknown> = readSettingsObject(targetPath) ?? {};
 	if (value === undefined) {
 		delete settings[key];
 	} else {
 		settings[key] = value;
 	}
+	const payload = JSON.stringify(settings, null, 2) + "\n";
+
+	let tmp = "";
 	try {
 		mkdirSync(dir, { recursive: true });
-		writeFileSync(path, JSON.stringify(settings, null, 2) + "\n");
-	} catch { /* best effort */ }
+		tmp = `${targetPath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
+		writeFileSync(tmp, payload, existingMode !== undefined ? { mode: existingMode } : undefined);
+		if (existingMode !== undefined) chmodSync(tmp, existingMode);
+		renameSync(tmp, targetPath);
+		tmp = "";
+		return { ok: true, scope, path: settingsPath };
+	} catch {
+		if (tmp) {
+			try {
+				unlinkSync(tmp);
+			} catch { /* best effort */ }
+		}
+		try {
+			if (existsSync(targetPath)) {
+				writeFileSync(targetPath, payload);
+				return { ok: true, scope, path: settingsPath };
+			}
+		} catch { /* fall through */ }
+		return { ok: false, scope, path: settingsPath };
+	} finally {
+		_settingsCache.clear(); // invalidate cache on write
+	}
 }
 
 let toolBackgroundOverride: "default" | "transparent" | "outlines" | null = null;
 
-function syncToolBackgroundMode(): void {
+function syncToolBackgroundMode(cwd?: string): void {
 	if (toolBackgroundOverride) {
 		toolBackgroundMode = toolBackgroundOverride;
 		return;
 	}
-	const settings = readSettings();
+	const settings = readSettings(cwd);
 	// Backward compat: "border" was renamed to "outlines"
 	const raw = settings.toolBackground === "border" ? "outlines" : settings.toolBackground;
 	toolBackgroundMode = raw ?? "transparent";
+}
+
+const SAVED_THEME_TOOL_BGS = new WeakMap<object, Map<string, string>>();
+const TOOL_BG_KEYS = ["toolPendingBg", "toolSuccessBg", "toolErrorBg"] as const;
+
+function getThemeBgContainer(theme: unknown): object | null {
+	const themeAny = theme as any;
+	if (themeAny?.bgAnsi instanceof Map) return themeAny.bgAnsi;
+	if (themeAny?.bgColors && typeof themeAny.bgColors === "object") return themeAny.bgColors;
+	return null;
+}
+
+function getThemeBg(theme: unknown, key: string): string | undefined {
+	const themeAny = theme as any;
+	if (themeAny?.bgAnsi instanceof Map) return themeAny.bgAnsi.get(key);
+	if (themeAny?.bgColors instanceof Map) return themeAny.bgColors.get(key);
+	if (themeAny?.bgColors && typeof themeAny.bgColors === "object") return themeAny.bgColors[key];
+	return undefined;
 }
 
 function setThemeBg(theme: unknown, key: string, value: string): void {
 	const themeAny = theme as any;
 	// pi >= 1.4 keeps background escapes in `bgAnsi`; older versions in `bgColors`.
 	if (themeAny.bgAnsi instanceof Map) {
-		themeAny.bgAnsi.set(key, value);
+		if (themeAny.bgAnsi.get(key) !== value) themeAny.bgAnsi.set(key, value);
 	} else if (themeAny.bgColors instanceof Map) {
-		themeAny.bgColors.set(key, value);
+		if (themeAny.bgColors.get(key) !== value) themeAny.bgColors.set(key, value);
 	} else if (themeAny.bgColors && typeof themeAny.bgColors === "object") {
-		themeAny.bgColors[key] = value;
+		if (themeAny.bgColors[key] !== value) themeAny.bgColors[key] = value;
 	}
 }
 
@@ -319,11 +441,33 @@ function applyToolBackgroundMode(theme: unknown): void {
 	const globalTheme = getGlobalPiTheme();
 	if (globalTheme) targets.add(globalTheme);
 	for (const t of targets) {
+		const container = getThemeBgContainer(t);
+		let saved = container ? SAVED_THEME_TOOL_BGS.get(container) : undefined;
+		if (container && !saved) {
+			saved = new Map<string, string>();
+			SAVED_THEME_TOOL_BGS.set(container, saved);
+		}
+		if (saved) {
+			for (const key of TOOL_BG_KEYS) {
+				const current = getThemeBg(t, key);
+				if (typeof current === "string" && current !== TRANSPARENT_BG) {
+					saved.set(key, current);
+				}
+			}
+		}
 		setThemeBg(t, "userMessageBg", TRANSPARENT_BG);
-		if (toolBackgroundMode === "default") continue;
-		setThemeBg(t, "toolPendingBg", TRANSPARENT_BG);
-		setThemeBg(t, "toolSuccessBg", TRANSPARENT_BG);
-		setThemeBg(t, "toolErrorBg", TRANSPARENT_BG);
+		if (toolBackgroundMode === "default") {
+			if (saved) {
+				for (const key of TOOL_BG_KEYS) {
+					const original = saved.get(key);
+					if (original !== undefined) setThemeBg(t, key, original);
+				}
+			}
+			continue;
+		}
+		for (const key of TOOL_BG_KEYS) {
+			setThemeBg(t, key, TRANSPARENT_BG);
+		}
 	}
 }
 
@@ -477,10 +621,14 @@ function copyPayloadForLine(line: string): string | undefined {
 
 function roundedCodeBlockTop(width: number, language: string): string {
 	if (width <= 1) return `${BORDER_COLOR}│${TRANSPARENT_RESET}`;
-	const label = formatCodeBlockLanguageLabel(language);
+	let label = formatCodeBlockLanguageLabel(language);
 	if (!label || width < 8) {
 		const inner = Math.max(0, width - 2);
 		return `${BORDER_COLOR}╭${TRANSPARENT_RESET}${mutedDotFill(inner)}${BORDER_COLOR}╮${TRANSPARENT_RESET}`;
+	}
+	const maxLabelWidth = Math.max(1, width - 6);
+	if (visibleWidth(label) > maxLabelWidth) {
+		label = truncateToWidth(label, maxLabelWidth, "…", false);
 	}
 	const labelStyled = `${CODE_BLOCK_LANG_FG}${CHROME_ITALIC}${label}${RESET}${TRANSPARENT_RESET}`;
 	const labelW = visibleWidth(labelStyled);
@@ -550,7 +698,7 @@ function sanitizeRenderedTextBlockLines(lines: string[], width?: number): string
 			i++;
 			continue;
 		}
-		result.push(stripRenderedHeadingMarkers(lines[i]).replace(/###/g, ""));
+		result.push(stripRenderedHeadingMarkers(lines[i]));
 		i++;
 	}
 	return result;
@@ -621,20 +769,20 @@ function splitRenderedImageBlock(lines: string[]): { textLines: string[]; imageL
 	return { textLines, imageLines: lines.slice(imageStart) };
 }
 
-function toolGroupingEnabled(): boolean {
-	return readSettings().groupToolCalls !== false;
+function toolGroupingEnabled(cwd?: string): boolean {
+	return readSettings(cwd).groupToolCalls !== false;
 }
 
-function setToolGroupingEnabled(enabled: boolean): void {
-	writeSettingsKey("groupToolCalls", enabled);
+function setToolGroupingEnabled(enabled: boolean, cwd?: string): WriteSettingsResult {
+	return writeSettingsKey("groupToolCalls", enabled, { cwd });
 }
 
 type ThinkingMode = "live" | "full" | "latest";
 const THINKING_MODES = ["live", "full", "latest"] as const;
 let thinkingVisibilityOverride: boolean | undefined;
 
-function getThinkingMode(): ThinkingMode {
-	return getMode(readSettings().thinkingMode, THINKING_MODES, "live");
+function getThinkingMode(cwd?: string): ThinkingMode {
+	return getMode(readSettings(cwd).thinkingMode, THINKING_MODES, "live");
 }
 
 function isAssistantThinkingComplete(comp: any, message: any): boolean {
@@ -916,8 +1064,9 @@ function tintGroupedToolLine(line: string, _groupedLabel?: string): string {
 function getToolArgSummary(tool: any): string {
 	const args = tool?.args ?? {};
 	const name = getToolName(tool);
+	const toolCwd = typeof tool?.cwd === "string" && tool.cwd ? tool.cwd : process.cwd();
 	if (name === "read") {
-		let value = shortPath(process.cwd(), args.path ?? "");
+		let value = shortPath(toolCwd, args.path ?? "");
 		const parts: string[] = [];
 		if (args.offset) parts.push(`offset=${args.offset}`);
 		if (args.limit) parts.push(`limit=${args.limit}`);
@@ -927,7 +1076,7 @@ function getToolArgSummary(tool: any): string {
 	if (name === "bash") return cachedBashPresentation(args.command ?? "").headline;
 	if (name === "grep") return `"${summarizeText(args.pattern ?? "", 40)}"${args.path ? ` in ${args.path}` : ""}`;
 	if (name === "find") return `"${summarizeText(args.pattern ?? "", 40)}"${args.path ? ` in ${args.path}` : ""}`;
-	if (name === "ls") return shortPath(process.cwd(), args.path ?? ".");
+	if (name === "ls") return shortPath(toolCwd, args.path ?? ".");
 	if (parseNamespacedMcpToolName(name)) return summarizeDirectMcpArgs(args);
 	return summarizeUnknownToolArgs(args);
 }
@@ -1723,7 +1872,13 @@ function formatTodoOverlayLines(lines: string[], width: number): string[] {
 	// non-empty line unless it's actually the Magic Context todo overlay.
 	let firstContent: string | undefined;
 	for (let i = 0; i < lines.length; i++) {
-		const plain = stripAnsi(lines[i]).trim();
+		const raw = lines[i];
+		if (!raw) continue;
+		if (!raw.includes("Todos")) {
+			if (stripAnsi(raw).trim()) return lines;
+			continue;
+		}
+		const plain = stripAnsi(raw).trim();
 		if (!plain) continue;
 		firstContent = plain;
 		break;
@@ -1770,8 +1925,7 @@ function patchGlobalToolBorders(): void {
 		const rendered = originalRender.call(this, width);
 		const mouseLayout = (this as { mouseLayout?: unknown }).mouseLayout;
 		if (!Array.isArray(rendered) || rendered.length === 0) return rendered;
-		const todoOverlay = formatTodoOverlayLines(rendered, width);
-		if (!isToolExecutionLike(this)) return todoOverlay;
+		if (!isToolExecutionLike(this)) return formatTodoOverlayLines(rendered, width);
 		const branchCache = { branchKey: toolBranchRenderCacheKey(), branchEpoch: _toolBranchVisualEpoch };
 		if (toolBackgroundMode === "default") {
 			(this as any)[TOOL_RENDER_CACHE] = { width, mode: toolBackgroundMode, lines: rendered, mouseLayout, ...branchCache };
@@ -1821,13 +1975,14 @@ function summarizeText(text: string, max = 60): string {
 
 let extraToolOutputExpanded = false;
 
-function syncExtraToolDetailMode(): void {
-	extraToolOutputExpanded = readSettings().extraToolOutputExpanded === true;
+function syncExtraToolDetailMode(cwd?: string): void {
+	extraToolOutputExpanded = readSettings(cwd).extraToolOutputExpanded === true;
 }
 
-function setExtraToolDetailMode(enabled: boolean): void {
-	extraToolOutputExpanded = enabled;
-	writeSettingsKey("extraToolOutputExpanded", enabled);
+function setExtraToolDetailMode(enabled: boolean, cwd?: string): WriteSettingsResult {
+	const result = writeSettingsKey("extraToolOutputExpanded", enabled, { cwd });
+	extraToolOutputExpanded = readSettings(cwd).extraToolOutputExpanded === true;
+	return result;
 }
 
 function configuredKeyHint(binding: Parameters<typeof keyText>[0], fallbackKey: string, description: string): string {
@@ -2499,18 +2654,21 @@ function thinkingSummaryStyledText(body: string, hovered = false): string {
 }
 
 /** Brighten an existing color without changing its hue. */
+function brightenRgb(r: number, g: number, b: number): string {
+	const maximum = Math.max(r, g, b);
+	if (maximum === 0) return `\x1b[38;2;${r};${g};${b}m`;
+	const scale = Math.min(1.12, 255 / maximum);
+	return `\x1b[38;2;${Math.round(r * scale)};${Math.round(g * scale)};${Math.round(b * scale)}m`;
+}
+
 function brightenAnsi(baseAnsi: string): string {
 	const rgb = parseAnsiRgb(baseAnsi);
 	if (!rgb) return "\x1b[97m";
-	const maximum = Math.max(rgb.r, rgb.g, rgb.b);
-	if (maximum === 0) return baseAnsi;
-	const scale = Math.min(1.12, 255 / maximum);
-	const lift = (channel: number) => Math.round(channel * scale);
-	return `\x1b[38;2;${lift(rgb.r)};${lift(rgb.g)};${lift(rgb.b)}m`;
+	return brightenRgb(rgb.r, rgb.g, rgb.b);
 }
 
 function brightenRenderedLine(line: string): string {
-	return line.replace(/\x1b\[38;2;(\d+);(\d+);(\d+)m/g, (_match, r, g, b) => brightenAnsi(`\x1b[38;2;${r};${g};${b}m`));
+	return line.replace(/\x1b\[38;2;(\d+);(\d+);(\d+)m/g, (_match, r, g, b) => brightenRgb(Number(r), Number(g), Number(b)));
 }
 
 function thinkingActiveSummaryText(): string {
@@ -2528,6 +2686,7 @@ class HiddenThinkingSummary {
 	private cachedWidth?: number;
 	private cachedHovered?: boolean;
 	private cachedLines?: string[];
+	private chromeEpoch = -1;
 
 	constructor(body: string) {
 		this.body = stripAnsi(body).trim();
@@ -2550,14 +2709,21 @@ class HiddenThinkingSummary {
 		this.cachedWidth = undefined;
 		this.cachedHovered = undefined;
 		this.cachedLines = undefined;
+		this.chromeEpoch = -1;
 	}
 
 	render(width: number): string[] {
-		if (this.cachedLines && this.cachedWidth === width && this.cachedHovered === this.hovered) return this.cachedLines;
+		if (
+			this.cachedLines
+			&& this.cachedWidth === width
+			&& this.cachedHovered === this.hovered
+			&& this.chromeEpoch === _toolBranchVisualEpoch
+		) return this.cachedLines;
 		const safeWidth = Number.isFinite(width) ? Math.max(0, Math.floor(width)) : 0;
 		if (safeWidth <= 0) {
 			this.cachedWidth = width;
 			this.cachedHovered = this.hovered;
+			this.chromeEpoch = _toolBranchVisualEpoch;
 			this.cachedLines = [""];
 			return this.cachedLines;
 		}
@@ -2569,6 +2735,7 @@ class HiddenThinkingSummary {
 		const line = padRenderedLineToWidth(clampLineWidth(text, safeWidth), safeWidth);
 		this.cachedWidth = width;
 		this.cachedHovered = this.hovered;
+		this.chromeEpoch = _toolBranchVisualEpoch;
 		this.cachedLines = [line];
 		return this.cachedLines;
 	}
@@ -2844,23 +3011,24 @@ function looksLikeDisplayMath(text: string): boolean {
 	return /\\[A-Za-z]+|[_^=<>+*/|]/.test(text) && /[A-Za-z0-9}]/.test(text);
 }
 
+const LOOSE_MATH_OPEN_RE = /(^|\r?\n)[ \t]*\[[ \t]*(?:\r?\n)/g;
+const LOOSE_MATH_CLOSE_RE = /(^|\r?\n)[ \t]*\][ \t]*(?=\r?\n|$)/g;
+
 function findNextLooseBracketMathBlock(text: string, start: number): MathBlock | undefined {
-	const openRe = /(^|\r?\n)[ \t]*\[[ \t]*(?:\r?\n)/g;
-	openRe.lastIndex = start;
+	LOOSE_MATH_OPEN_RE.lastIndex = start;
 	let openMatch: RegExpExecArray | null;
-	while ((openMatch = openRe.exec(text))) {
+	while ((openMatch = LOOSE_MATH_OPEN_RE.exec(text))) {
 		const index = openMatch.index + openMatch[1].length;
 		const contentStart = openMatch.index + openMatch[0].length;
-		const closeRe = /(^|\r?\n)[ \t]*\][ \t]*(?=\r?\n|$)/g;
-		closeRe.lastIndex = contentStart;
-		const closeMatch = closeRe.exec(text);
+		LOOSE_MATH_CLOSE_RE.lastIndex = contentStart;
+		const closeMatch = LOOSE_MATH_CLOSE_RE.exec(text);
 		if (!closeMatch) return undefined;
 		const contentEnd = closeMatch.index + closeMatch[1].length;
 		const raw = text.slice(contentStart, contentEnd).trim();
 		if (looksLikeDisplayMath(raw)) {
 			return { index, contentStart, contentEnd, endIndex: closeMatch.index + closeMatch[0].length };
 		}
-		openRe.lastIndex = contentStart;
+		LOOSE_MATH_OPEN_RE.lastIndex = contentStart;
 	}
 	return undefined;
 }
@@ -3031,7 +3199,7 @@ function formatMathForDisplay(raw: string, multiline = true): string {
 }
 
 function renderMathBlock(raw: string, width: number, theme: MarkdownThemeLike): string[] {
-	const safeWidth = Math.max(12, width);
+	const safeWidth = Math.max(1, width);
 	const formatted = formatMathForDisplay(raw, true) || raw;
 	return formatted
 		.split("\n")
@@ -3043,6 +3211,7 @@ class DottedParagraph {
 	private markdownTheme: MarkdownThemeLike;
 	private cachedWidth?: number;
 	private cachedLines?: string[];
+	private chromeEpoch = -1;
 
 	constructor(text: string, markdownTheme: MarkdownThemeLike, options?: MarkdownOptions) {
 		this.markdownTheme = copySafeMarkdownTheme(markdownTheme);
@@ -3052,16 +3221,18 @@ class DottedParagraph {
 	invalidate(): void {
 		this.cachedWidth = undefined;
 		this.cachedLines = undefined;
+		this.chromeEpoch = -1;
 		for (const segment of this.segments) {
 			if (segment.kind === "markdown") segment.md.invalidate();
 		}
 	}
 
 	render(width: number): string[] {
-		if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
+		if (this.cachedLines && this.cachedWidth === width && this.chromeEpoch === _toolBranchVisualEpoch) return this.cachedLines;
 		const safeWidth = Number.isFinite(width) ? Math.max(0, Math.floor(width)) : 0;
 		if (safeWidth <= 0) {
 			this.cachedWidth = width;
+			this.chromeEpoch = _toolBranchVisualEpoch;
 			this.cachedLines = [""];
 			return this.cachedLines;
 		}
@@ -3069,6 +3240,7 @@ class DottedParagraph {
 		const PREFIX_W = 3;
 		if (safeWidth <= PREFIX_W) {
 			this.cachedWidth = width;
+			this.chromeEpoch = _toolBranchVisualEpoch;
 			this.cachedLines = [clampLineWidth(" ● ", safeWidth)];
 			return this.cachedLines;
 		}
@@ -3095,6 +3267,7 @@ class DottedParagraph {
 			return gap > 0 ? line + " ".repeat(gap) : gap < 0 ? truncateToWidth(line, safeWidth, "", false) : line;
 		});
 		this.cachedWidth = width;
+		this.chromeEpoch = _toolBranchVisualEpoch;
 		this.cachedLines = rendered;
 		return rendered;
 	}
@@ -3139,6 +3312,9 @@ class ThinkingParagraph {
 	private hovered = false;
 	private cachedWidth?: number;
 	private cachedLines?: string[];
+	private cachedBaseLines?: string[];
+	private cachedMd?: InstanceType<typeof Markdown>;
+	private cachedMdEpoch = -1;
 	private cachedHovered = false;
 	private chromeEpoch = -1;
 	private options?: MarkdownOptions;
@@ -3146,7 +3322,7 @@ class ThinkingParagraph {
 	setHovered(hovered: boolean): void {
 		if (this.hovered === hovered) return;
 		this.hovered = hovered;
-		this.invalidate();
+		this.cachedLines = undefined;
 	}
 
 	constructor(
@@ -3162,6 +3338,7 @@ class ThinkingParagraph {
 	}
 
 	private thinkingMarkdown(): InstanceType<typeof Markdown> {
+		if (this.cachedMd && this.cachedMdEpoch === _toolBranchVisualEpoch) return this.cachedMd;
 		const DIM_FG = WORKED_LINE_FG;
 		const wrap = (s: string) => `${DIM_FG}${s}`;
 		const wrapPlain = (s: string) => wrap(stripAnsi(s));
@@ -3186,12 +3363,17 @@ class ThinkingParagraph {
 			italic: false,
 			color: (s: string) => `${DIM_FG}${s}`,
 		};
-		return new Markdown(this.text, 0, 0, plainTheme, plainStyle, this.options);
+		this.cachedMd = new Markdown(this.text, 0, 0, plainTheme, plainStyle, this.options);
+		this.cachedMdEpoch = _toolBranchVisualEpoch;
+		return this.cachedMd;
 	}
 
 	invalidate(): void {
 		this.cachedWidth = undefined;
 		this.cachedLines = undefined;
+		this.cachedBaseLines = undefined;
+		this.cachedMd = undefined;
+		this.cachedMdEpoch = -1;
 		this.chromeEpoch = -1;
 	}
 
@@ -3207,20 +3389,29 @@ class ThinkingParagraph {
 		const safeWidth = Number.isFinite(width) ? Math.max(0, Math.floor(width)) : 0;
 		if (safeWidth <= 0) {
 			this.cachedWidth = width;
+			this.cachedHovered = this.hovered;
 			this.cachedLines = [""];
 			this.chromeEpoch = _toolBranchVisualEpoch;
 			return this.cachedLines;
 		}
-		const md = this.thinkingMarkdown();
 		// " ∴ " = 1 margin + symbol + space = 3 visible chars
 		const PREFIX_W = 3;
 		const prefix = `${WORKED_LINE_FG}∴${RESET}`;
 		if (safeWidth <= PREFIX_W) {
 			this.cachedWidth = width;
+			this.cachedHovered = this.hovered;
+			this.chromeEpoch = _toolBranchVisualEpoch;
 			this.cachedLines = [clampLineWidth(` ${prefix} `, safeWidth)];
 			return this.cachedLines;
 		}
-		const lines = sanitizeRenderedTextBlockLines(md.render(safeWidth - PREFIX_W), safeWidth - PREFIX_W);
+		let lines: string[];
+		if (this.cachedBaseLines && this.cachedWidth === width && this.chromeEpoch === _toolBranchVisualEpoch) {
+			lines = this.cachedBaseLines;
+		} else {
+			const md = this.thinkingMarkdown();
+			lines = sanitizeRenderedTextBlockLines(md.render(safeWidth - PREFIX_W), safeWidth - PREFIX_W);
+			this.cachedBaseLines = lines;
+		}
 		const displayLines = this.hovered ? lines.map((line) => brightenRenderedLine(line)) : lines;
 		let symbolPlaced = false;
 		const gutter = copySkip("   ");
@@ -3596,9 +3787,11 @@ function copySkipUserPad(line: string): string {
 
 /** Paint a full-width band behind a line, surviving resets inside it. */
 function withUserBand(line: string, width: number, band: string): string {
-	const content = clampLineWidth(line, width);
+	const ceiling = Math.min(width, terminalColumnCeiling() || width);
+	if (ceiling <= 0) return "";
+	const content = clampLineWidth(line, ceiling);
 	if (!band) return content;
-	const pad = " ".repeat(Math.max(0, width - visibleWidth(content)));
+	const pad = " ".repeat(Math.max(0, ceiling - visibleWidth(content)));
 	return `${band}${content.replace(/\x1b\[0?m|\x1b\[49m/g, (reset) => reset + band)}${pad}${TRANSPARENT_BG}`;
 }
 
@@ -3913,7 +4106,6 @@ const TOOL_HOVER_KEY = Symbol.for("pi-claude-style-tools:tool-hover");
 function setToolHover(component: any, hovered: boolean): boolean {
 	if (component[TOOL_HOVER_KEY] === hovered) return false;
 	component[TOOL_HOVER_KEY] = hovered;
-	clearToolRenderCache(component);
 	return true;
 }
 
@@ -4364,17 +4556,27 @@ function hasOwnArg(args: any, key: string): boolean {
 	return !!args && Object.prototype.hasOwnProperty.call(args, key);
 }
 
+function resolveToolPath(baseCwd: string, filePath: string): string {
+	const stripped = filePath.startsWith("@") ? filePath.slice(1) : filePath;
+	const expanded = stripped === "~"
+		? homedir()
+		: stripped.startsWith("~/")
+			? join(homedir(), stripped.slice(2))
+			: stripped;
+	return resolve(baseCwd, expanded);
+}
+
 function fileExistsForTool(cwd: string, filePath: string): boolean {
 	if (!filePath) return false;
 	try {
-		return existsSync(resolve(cwd, filePath));
+		return existsSync(resolveToolPath(cwd, filePath));
 	} catch {
 		return false;
 	}
 }
 
 const WRITE_EXISTED_BEFORE = new Map<string, boolean>();
-const EDIT_LOCALIZED = new Map<string, Promise<LocalizedEditDiff[] | null>>();
+const EDIT_LOCALIZED = new Map<string, { baseCwd: string; promise: Promise<LocalizedEditDiff[] | null> }>();
 
 interface RtkRewriteRecord {
 	original: string;
@@ -4388,33 +4590,6 @@ const RTK_PENDING_REWRITES: RtkRewriteRecord[] = [];
 const RTK_PENDING_REWRITE_LIMIT = 20;
 // Tool ids arrive once per bash call and nothing retires them; keep the newest only.
 const RTK_TOOL_RECORD_LIMIT = 256;
-const PRESERVED_BASH_PREVIEWS = new Set<string>();
-const BASH_PREVIEW_INVALIDATORS = new Map<string, () => void>();
-
-function preserveBashPreview(ctx: any): void {
-	const toolCallId = typeof ctx?.toolCallId === "string" ? ctx.toolCallId : undefined;
-	if (!toolCallId) return;
-	PRESERVED_BASH_PREVIEWS.add(toolCallId);
-	if (typeof ctx?.invalidate === "function") {
-		BASH_PREVIEW_INVALIDATORS.set(toolCallId, () => safeInvalidate(ctx));
-	}
-}
-
-function clearPreservedBashPreviews(): void {
-	if (PRESERVED_BASH_PREVIEWS.size === 0) return;
-	const invalidators = [...PRESERVED_BASH_PREVIEWS]
-		.map((toolCallId) => BASH_PREVIEW_INVALIDATORS.get(toolCallId))
-		.filter((invalidate): invalidate is () => void => typeof invalidate === "function");
-	PRESERVED_BASH_PREVIEWS.clear();
-	BASH_PREVIEW_INVALIDATORS.clear();
-	for (const invalidate of invalidators) {
-		try { invalidate(); } catch { /* noop */ }
-	}
-}
-
-function shouldPreserveBashPreview(ctx: any): boolean {
-	return typeof ctx?.toolCallId === "string" && PRESERVED_BASH_PREVIEWS.has(ctx.toolCallId);
-}
 
 function normalizeRtkCommandPreview(command: string): string {
 	return command.replace(/\s+/g, " ").trim();
@@ -4536,17 +4711,10 @@ function trackRtkOriginalBashCommand(toolCallId: unknown, args: unknown): void {
 	}
 }
 
-function forgetRtkBashCommand(toolCallId: unknown): void {
-	if (typeof toolCallId !== "string") return;
-	RTK_ORIGINAL_BASH_COMMANDS.delete(toolCallId);
-	RTK_REWRITES_BY_TOOL_ID.delete(toolCallId);
-}
-
 function clearRtkRewriteState(): void {
 	RTK_ORIGINAL_BASH_COMMANDS.clear();
 	RTK_REWRITES_BY_TOOL_ID.clear();
 	RTK_PENDING_REWRITES.length = 0;
-	clearPreservedBashPreviews();
 }
 
 function getWriteWasNewFile(ctx: any, cwd: string, filePath: string, reveal = shouldRevealCallArgs(ctx)): boolean | undefined {
@@ -4875,7 +5043,13 @@ function dirIcon(): string {
 
 function lineCount(text: string): number {
 	if (!text) return 0;
-	return text.split("\n").length;
+	let count = 1;
+	let pos = text.indexOf("\n");
+	while (pos !== -1) {
+		count++;
+		pos = text.indexOf("\n", pos + 1);
+	}
+	return count;
 }
 
 function padToWidth(line: string, width: number): string {
@@ -4986,9 +5160,12 @@ class ToolText extends Text {
 		) return this.toolCachedLines;
 		if (!this.value || this.value.trim() === "") {
 			this.totalLines = 0;
+			this.toolCachedLimit = this.renderLimit;
 			this.toolCachedValue = this.value;
 			this.toolCachedWidth = width;
 			this.toolCachedLines = [];
+			(this as any)._toolBranchCacheKey = branchKey;
+			(this as any)._toolBranchCacheEpoch = _toolBranchVisualEpoch;
 			return this.toolCachedLines;
 		}
 		const contentWidth = Math.max(1, width);
@@ -5059,6 +5236,14 @@ function expandedPreviewLimit(): number {
 function bashCollapsedLimit(): number {
 	const value = readSettings().bashCollapsedLines;
 	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : 10;
+}
+
+function readOutputMode(): "hidden" | "summary" | "preview" {
+	return getMode(readSettings().readOutputMode, ["hidden", "summary", "preview"] as const, "preview");
+}
+
+function searchOutputMode(): "hidden" | "count" | "preview" {
+	return getMode(readSettings().searchOutputMode, ["hidden", "count", "preview"] as const, "preview");
 }
 
 function bashOutputMode(): "opencode" | "summary" | "preview" {
@@ -5253,14 +5438,16 @@ function xterm256ToRgb(index: number): { r: number; g: number; b: number } | nul
 	return { r: level, g: level, b: level };
 }
 
+const ANSI_TRUECOLOR_RE = /\x1b\[(?:38|48);2;(\d+);(\d+);(\d+)m/;
+const ANSI_256_RE = /\x1b\[(?:38|48);5;(\d+)m/;
+
 function parseAnsiRgb(ansi: string): { r: number; g: number; b: number } | null {
 	if (!ansi) return null;
-	const esc = "\u001b";
 	// Truecolor: \e[38;2;R;G;Bm or \e[48;2;R;G;Bm
-	const tc = ansi.match(new RegExp(`${esc}\\[(?:38|48);2;(\\d+);(\\d+);(\\d+)m`));
+	const tc = ansi.match(ANSI_TRUECOLOR_RE);
 	if (tc) return { r: +tc[1], g: +tc[2], b: +tc[3] };
 	// 256-color: \e[38;5;Nm or \e[48;5;Nm — happens on Apple Terminal, screen, etc.
-	const idx = ansi.match(new RegExp(`${esc}\\[(?:38|48);5;(\\d+)m`));
+	const idx = ansi.match(ANSI_256_RE);
 	if (idx) return xterm256ToRgb(+idx[1]);
 	return null;
 }
@@ -5336,11 +5523,23 @@ function currentThemePaletteFingerprint(): string | undefined {
 
 /** Resolved-color fingerprint so palette re-derives when the active theme file changes under the same name/object. */
 function themePaletteFingerprint(theme: any): string {
-	const keys = ["success", "error", "borderMuted", "accent", "muted", "toolDiffAdded", "toolDiffRemoved", "syntaxKeyword", "syntaxString"] as const;
 	// Tokens set to "" follow the terminal's default colors, which can change under the same theme.
 	const defaults = terminalDefaultColors(theme);
 	const terminal = defaults ? `${rgbToHex(defaults.background)}${rgbToHex(defaults.foreground)}` : "";
-	return [...keys.map((k) => safeFgAnsi(theme, k) ?? ""), themeAppearance(theme) ?? "", terminal].join("\u001f");
+	const mode = typeof theme?.getColorMode === "function" ? theme.getColorMode() : "truecolor";
+	return (themeAdaptiveEnabled() ? "1" : "0")
+		+ "\u001f" + mode
+		+ "\u001f" + (safeFgAnsi(theme, "success") ?? "")
+		+ "\u001f" + (safeFgAnsi(theme, "error") ?? "")
+		+ "\u001f" + (safeFgAnsi(theme, "borderMuted") ?? "")
+		+ "\u001f" + (safeFgAnsi(theme, "accent") ?? "")
+		+ "\u001f" + (safeFgAnsi(theme, "muted") ?? "")
+		+ "\u001f" + (safeFgAnsi(theme, "toolDiffAdded") ?? "")
+		+ "\u001f" + (safeFgAnsi(theme, "toolDiffRemoved") ?? "")
+		+ "\u001f" + (safeFgAnsi(theme, "syntaxKeyword") ?? "")
+		+ "\u001f" + (safeFgAnsi(theme, "syntaxString") ?? "")
+		+ "\u001f" + (themeAppearance(theme) ?? "")
+		+ "\u001f" + terminal;
 }
 
 function invalidateThemePaletteCache(): void {
@@ -5349,8 +5548,8 @@ function invalidateThemePaletteCache(): void {
 	_themePaletteCacheFingerprint = null;
 }
 
-function themeAdaptiveEnabled(): boolean {
-	const settings = readSettings();
+function themeAdaptiveEnabled(cwd?: string): boolean {
+	const settings = readSettings(cwd);
 	return settings.themeAdaptive !== false;
 }
 
@@ -5359,8 +5558,8 @@ function themeAdaptiveEnabled(): boolean {
 // ---------------------------------------------------------------------------
 
 /** On by default; `terminalTheme: false` (or `/cc-theme terminal off`) turns it off. */
-function terminalThemeEnabled(): boolean {
-	return readSettings().terminalTheme !== false;
+function terminalThemeEnabled(cwd?: string): boolean {
+	return readSettings(cwd).terminalTheme !== false;
 }
 
 /** `pi --use-theme <name>` picks the theme for this run. */
@@ -5394,7 +5593,9 @@ function applyTerminalTheme(ctx: any, options: { announce: boolean; reportUnavai
 	if (current !== SYSTEM_THEME_NAME) {
 		// Remember what to go back to; a "light/dark" pair is kept as the pair.
 		const previous = readPiThemeSetting() ?? current;
-		if (previous && previous !== SYSTEM_THEME_NAME) writeSettingsKey("terminalThemePrevious", previous);
+		if (previous && previous !== SYSTEM_THEME_NAME) {
+			writeSettingsKey("terminalThemePrevious", previous, { cwd: ctx?.cwd, scope: "user" });
+		}
 		const result = ctx.ui.setTheme(SYSTEM_THEME_NAME);
 		if (!result?.success) {
 			ctx.ui.notify(`Could not switch to the terminal theme: ${result?.error ?? "unknown error"}`, "error");
@@ -5417,8 +5618,8 @@ function applyTerminalTheme(ctx: any, options: { announce: boolean; reportUnavai
 
 /** Turn terminalTheme off and restore the theme that was active before it. */
 function restorePreviousTheme(ctx: any): string | undefined {
-	const previous = readSettings().terminalThemePrevious;
-	writeSettingsKey("terminalThemePrevious", undefined);
+	const previous = readSettings(ctx?.cwd).terminalThemePrevious;
+	writeSettingsKey("terminalThemePrevious", undefined, { cwd: ctx?.cwd, scope: "user" });
 	if (!ctx?.hasUI || !previous || activeThemeName(ctx.ui) !== SYSTEM_THEME_NAME) return undefined;
 	let name = previous;
 	if (previous.includes("/")) {
@@ -5599,29 +5800,18 @@ function refreshToolBranchDisplaysInState(state: Record<string, unknown> | undef
 	}
 }
 
-function refreshAllToolBranchVisuals(ctx: any): void {
-	_settingsCache = null;
-	syncToolBackgroundMode();
-	invalidateThemePaletteCache();
-	applyToolBackgroundMode(ctx?.ui?.theme);
-	applyToolBranchColor(ctx?.ui?.theme);
-	bumpToolBranchVisualEpoch(); // always bust ToolText + container caches
-	// Tool rows recompute branch markup on next render (liveBranchDisplay + cache bust).
-	if (ctx?.hasUI) {
-		try {
-			ctx.ui.setToolsExpanded(ctx.ui.getToolsExpanded());
-			ctx.ui.invalidate?.();
-			ctx.ui.requestRender?.();
-		} catch { /* noop */ }
-	}
-}
+let _lastRebindSignature: string | undefined;
 
 /** Re-derive borders, branches, diffs, and spinner keys from the active pi theme (no cross-extension deps). */
-function rebindUiChromeToTheme(ctx: any): void {
+function rebindUiChromeToTheme(ctx: any, force = true): void {
 	if (!ctx?.hasUI) return;
-	_settingsCache = null;
-	syncToolBackgroundMode();
+	if (ctx?.cwd) activeSettingsCwd = ctx.cwd;
+	_settingsCache.clear();
+	syncToolBackgroundMode(ctx?.cwd);
 	const theme = ctx.ui?.theme;
+	const signature = `${theme ? themePaletteFingerprint(theme) : ""}|${toolBackgroundMode}`;
+	if (!force && signature === _lastRebindSignature) return;
+	_lastRebindSignature = signature;
 	invalidateThemePaletteCache();
 	clearHighlightCache();
 	applyDiffPalette();
@@ -5629,18 +5819,23 @@ function rebindUiChromeToTheme(ctx: any): void {
 	applyToolBackgroundMode(theme);
 	applyThemePaletteIfNeeded(theme);
 	syncDiffShikiTheme(theme);
-	if (themeAdaptiveEnabled() && theme?.getFgAnsi && !hasExplicitBgConfig) {
+	if (themeAdaptiveEnabled(ctx?.cwd) && theme?.getFgAnsi && !hasExplicitBgConfig) {
 		autoDeriveBgFromTheme(theme);
 		autoDerivePending = false;
 	}
+	applyToolBranchColor(theme);
 	bumpToolBranchVisualEpoch();
-	refreshAllToolBranchVisuals(ctx);
+	try {
+		ctx.ui.setToolsExpanded(ctx.ui.getToolsExpanded());
+		ctx.ui.invalidate?.();
+		ctx.ui.requestRender?.();
+	} catch { /* noop */ }
 }
 
 function scheduleDeferredChromeRebind(ctx: any, delayMs = 0): void {
 	const timer = setTimeout(() => {
 		try {
-			rebindUiChromeToTheme(ctx);
+			rebindUiChromeToTheme(ctx, false);
 		} catch { /* noop */ }
 	}, delayMs);
 	unrefTimer(timer);
@@ -5876,8 +6071,6 @@ function applyThemePaletteIfNeeded(theme: any): void {
 		_themePaletteCacheName === themeName &&
 		_themePaletteCacheFingerprint === fingerprint
 	) {
-		applyToolBranchColor(theme);
-		syncOutlineChromeFromBranch(theme);
 		return;
 	}
 	const paletteChanged =
@@ -6246,8 +6439,12 @@ function wrapAnsi(text: string, width: number, maxRows = adaptiveWrapRows(), fil
 						break;
 					}
 				}
-				if (hasMore && width > 2) row += `${D_RST}${FG_DIM}›${D_RST}`;
-				else row += fillBg + " ".repeat(Math.max(0, width - vis)) + D_RST;
+				if (hasMore && width > 2) {
+					const pad = " ".repeat(Math.max(0, effectiveWidth - vis));
+					row += `${fillBg}${pad}${D_RST}${FG_DIM}›${D_RST}`;
+				} else {
+					row += fillBg + " ".repeat(Math.max(0, width - vis)) + D_RST;
+				}
 				rows.push(row);
 				return rows;
 			}
@@ -6301,8 +6498,7 @@ function diffSummaryWithMeta(added: number, removed: number, hunks: number, mode
 	return extras.length ? `${base} ${FG_DIM}•${D_RST} ${extras.join(` ${FG_DIM}•${D_RST} `)}` : base;
 }
 
-function collapsedDiffHint(remainingLines: number, hiddenHunks: number): string {
-	const width = termW();
+function collapsedDiffHint(remainingLines: number, hiddenHunks: number, width = termW()): string {
 	const candidates = [
 		`… (${remainingLines} more diff lines${hiddenHunks > 0 ? ` • ${hiddenHunks} more hunks` : ""} • ${keyHint("app.tools.expand", "to toggle")})`,
 		`… (${remainingLines} more lines${hiddenHunks > 0 ? ` • ${hiddenHunks} hunks` : ""})`,
@@ -6363,6 +6559,8 @@ function shouldUseSplit(diff: ParsedDiff, tw: number, maxRows = MAX_PREVIEW_LINE
 
 const EXT_LANG: Record<string, BundledLanguage> = {
 	ts: "typescript",
+	mts: "typescript",
+	cts: "typescript",
 	tsx: "tsx",
 	js: "javascript",
 	jsx: "jsx",
@@ -6375,8 +6573,12 @@ const EXT_LANG: Record<string, BundledLanguage> = {
 	java: "java",
 	c: "c",
 	cpp: "cpp",
+	cc: "cpp",
+	cxx: "cpp",
 	h: "c",
 	hpp: "cpp",
+	hh: "cpp",
+	hxx: "cpp",
 	cs: "csharp",
 	swift: "swift",
 	kt: "kotlin",
@@ -6385,14 +6587,19 @@ const EXT_LANG: Record<string, BundledLanguage> = {
 	css: "css",
 	scss: "scss",
 	json: "json",
+	jsonc: "jsonc",
 	yaml: "yaml",
 	yml: "yaml",
 	toml: "toml",
 	md: "markdown",
+	mdx: "mdx",
 	sql: "sql",
 	sh: "bash",
 	bash: "bash",
 	zsh: "bash",
+	fish: "fish",
+	ps1: "powershell",
+	zig: "zig",
 	lua: "lua",
 	php: "php",
 	dart: "dart",
@@ -6665,7 +6872,7 @@ async function renderUnifiedNow(
 		const numFg = borderFg || FG_LNUM;
 		const gutter = `${border}${gutterBg}${lnum(num, nw, numFg)}${signFg}${sign} ${D_RST}${DIVIDER} `;
 		const cont = `${border}${gutterBg}${" ".repeat(nw + 2)}${D_RST}${DIVIDER} `;
-		const rows = wrapAnsi(tabs(body), cw, adaptiveWrapRows(), bodyBg);
+		const rows = wrapAnsi(tabs(body), cw, MAX_WRAP_ROWS_WIDE, bodyBg);
 		out.push(`${gutter}${rows[0]}${D_RST}`);
 		for (let r = 1; r < rows.length; r++) out.push(`${cont}${rows[r]}${D_RST}`);
 	}
@@ -6717,7 +6924,7 @@ async function renderUnifiedNow(
 	}
 
 	out.push(diffRule(tw));
-	if (diff.lines.length > vis.length) out.push(`${BG_BASE}${FG_DIM}  ${collapsedDiffHint(diff.lines.length - vis.length, 0)}${D_RST}`);
+	if (diff.lines.length > vis.length) out.push(`${BG_BASE}${FG_DIM}  ${collapsedDiffHint(diff.lines.length - vis.length, 0, tw)}${D_RST}`);
 	return out.join("\n");
 }
 
@@ -6775,8 +6982,8 @@ async function renderSplitNow(
 	// (one row below 120 columns) cut long lines off instead of wrapping them. Wrap
 	// forced-split lines in full, with a cap only against minified one-liners.
 	const splitWrapRows = diffLayout() === "split"
-		? Math.max(adaptiveWrapRows(), FORCED_SPLIT_WRAP_ROWS)
-		: adaptiveWrapRows();
+		? Math.max(adaptiveWrapRows(tw), FORCED_SPLIT_WRAP_ROWS)
+		: adaptiveWrapRows(tw);
 	const canHL = diff.chars <= MAX_HL_CHARS && vis.length * 2 <= MAX_RENDER_LINES * 2;
 
 	const leftSrc: string[] = [];
@@ -6859,19 +7066,21 @@ async function renderSplitNow(
 				"right",
 			);
 		}
+		const emptyStripe = stripes(cw);
+		const emptyBlank = `${BG_EMPTY}${" ".repeat(cw)}${D_RST}`;
 		const maxRows = Math.max(leftResult.bodyRows.length, rightResult.bodyRows.length);
 		for (let rowIndex = 0; rowIndex < maxRows; rowIndex++) {
 			const lg = rowIndex === 0 ? leftResult.gutter : leftResult.contGutter;
 			const rg = rowIndex === 0 ? rightResult.gutter : rightResult.contGutter;
-			const lb = leftResult.bodyRows[rowIndex] ?? (!row.left ? stripes(cw) : `${BG_EMPTY}${" ".repeat(cw)}${D_RST}`);
-			const rb = rightResult.bodyRows[rowIndex] ?? (!row.right ? stripes(cw) : `${BG_EMPTY}${" ".repeat(cw)}${D_RST}`);
+			const lb = leftResult.bodyRows[rowIndex] ?? (!row.left ? emptyStripe : emptyBlank);
+			const rb = rightResult.bodyRows[rowIndex] ?? (!row.right ? emptyStripe : emptyBlank);
 			out.push(`${lg}${lb}${DIVIDER}${rg}${rb}`);
 		}
 	}
 
 	out.push(`${diffRule(half)}${FG_RULE}┊${D_RST}${diffRule(half)}`);
 	if (diff.simplified) out.push(`${FG_DIM}(large change: simplified line diff)${D_RST}`);
-	if (totalRows > vis.length) out.push(`${BG_BASE}${FG_DIM}  ${collapsedDiffHint(totalRows - vis.length, 0)}${D_RST}`);
+	if (totalRows > vis.length) out.push(`${BG_BASE}${FG_DIM}  ${collapsedDiffHint(totalRows - vis.length, 0, tw)}${D_RST}`);
 	return out.join("\n");
 }
 
@@ -6935,29 +7144,31 @@ function normalizeTextForFuzzyMatch(text: string): string {
 		.replace(/[\u00A0\u2002-\u200A\u202F\u205F\u3000]/g, " ");
 }
 
-function findEditMatch(content: string, oldText: string): { found: boolean; index: number; matchLength: number; usedFuzzyMatch: boolean } {
-	const exactIndex = content.indexOf(oldText);
-	if (exactIndex !== -1) return { found: true, index: exactIndex, matchLength: oldText.length, usedFuzzyMatch: false };
-	const fuzzyContent = normalizeTextForFuzzyMatch(content);
-	const fuzzyOldText = normalizeTextForFuzzyMatch(oldText);
-	const fuzzyIndex = fuzzyContent.indexOf(fuzzyOldText);
-	return fuzzyIndex === -1
-		? { found: false, index: -1, matchLength: 0, usedFuzzyMatch: false }
-		: { found: true, index: fuzzyIndex, matchLength: fuzzyOldText.length, usedFuzzyMatch: true };
-}
-
-function countFuzzyOccurrences(content: string, oldText: string): number {
-	const fuzzyContent = normalizeTextForFuzzyMatch(content);
-	const fuzzyOldText = normalizeTextForFuzzyMatch(oldText);
-	return fuzzyContent.split(fuzzyOldText).length - 1;
+function isUniqueOccurrence(haystack: string, needle: string): boolean {
+	if (!needle) return false;
+	const first = haystack.indexOf(needle);
+	return first !== -1 && haystack.indexOf(needle, first + needle.length) === -1;
 }
 
 function lineNumberAtIndex(text: string, index: number): number {
-	return text.slice(0, Math.max(0, index)).split("\n").length;
+	const stop = Math.min(text.length, Math.max(0, index));
+	let line = 1;
+	let pos = text.indexOf("\n");
+	while (pos !== -1 && pos < stop) {
+		line++;
+		pos = text.indexOf("\n", pos + 1);
+	}
+	return line;
 }
 
 function countLineBreaks(text: string): number {
-	return (text.match(/\n/g) ?? []).length;
+	let count = 0;
+	let pos = text.indexOf("\n");
+	while (pos !== -1) {
+		count++;
+		pos = text.indexOf("\n", pos + 1);
+	}
+	return count;
 }
 
 function offsetParsedDiff(diff: ParsedDiff, oldOffset: number, newOffset = oldOffset): ParsedDiff {
@@ -7060,16 +7271,42 @@ function oldContentFromPatch(patch: string, operations: Array<{ oldText: string;
 async function computeLocalizedEditDiffs(filePath: string, operations: Array<{ oldText: string; newText: string }>, cwd: string, savedPatch?: string): Promise<LocalizedEditDiff[] | null> {
 	if (!filePath || operations.length === 0) return null;
 	try {
-		const rawContent = savedPatch === undefined ? await readFileAsync(resolve(cwd, filePath), "utf8") : oldContentFromPatch(savedPatch, operations);
+		const rawContent = savedPatch === undefined ? await readFileAsync(resolveToolPath(cwd, filePath), "utf8") : oldContentFromPatch(savedPatch, operations);
 		const normalizedContent = normalizeToLf(stripBomText(rawContent));
 		const normalizedOps = operations.map((edit) => ({ oldText: normalizeToLf(edit.oldText), newText: normalizeToLf(edit.newText) }));
-		const baseContent = normalizedOps.some((edit) => findEditMatch(normalizedContent, edit.oldText).usedFuzzyMatch)
-			? normalizeTextForFuzzyMatch(normalizedContent)
-			: normalizedContent;
+		let cachedFuzzyContent: string | undefined;
+		const getFuzzyContent = () => (cachedFuzzyContent ??= normalizeTextForFuzzyMatch(normalizedContent));
+		let needFuzzy = false;
+		for (const edit of normalizedOps) {
+			if (normalizedContent.indexOf(edit.oldText) === -1) {
+				const fuzzyOld = normalizeTextForFuzzyMatch(edit.oldText);
+				if (getFuzzyContent().indexOf(fuzzyOld) !== -1) {
+					needFuzzy = true;
+					break;
+				}
+			}
+		}
+		const baseContent = needFuzzy ? getFuzzyContent() : normalizedContent;
 		const matches = normalizedOps.map((edit, editIndex) => {
-			const match = findEditMatch(baseContent, edit.oldText);
-			if (!match.found || countFuzzyOccurrences(baseContent, edit.oldText) !== 1) return null;
-			return { editIndex, matchIndex: match.index, matchLength: match.matchLength, newText: edit.newText };
+			let matchIndex = baseContent.indexOf(edit.oldText);
+			let matchLength = edit.oldText.length;
+			if (matchIndex !== -1) {
+				if (!needFuzzy) {
+					if (!isUniqueOccurrence(normalizedContent, edit.oldText)) return null;
+					const fuzzyOld = normalizeTextForFuzzyMatch(edit.oldText);
+					if (!isUniqueOccurrence(getFuzzyContent(), fuzzyOld)) return null;
+				} else {
+					const fuzzyOld = normalizeTextForFuzzyMatch(edit.oldText);
+					if (!isUniqueOccurrence(baseContent, fuzzyOld)) return null;
+				}
+			} else {
+				const fuzzyOld = normalizeTextForFuzzyMatch(edit.oldText);
+				const fuzzySource = needFuzzy ? baseContent : getFuzzyContent();
+				matchIndex = fuzzySource.indexOf(fuzzyOld);
+				matchLength = fuzzyOld.length;
+				if (matchIndex === -1 || !isUniqueOccurrence(fuzzySource, fuzzyOld)) return null;
+			}
+			return { editIndex, matchIndex, matchLength, newText: edit.newText };
 		});
 		if (matches.some((match) => match === null)) return null;
 		const ordered = [...(matches as Array<{ editIndex: number; matchIndex: number; matchLength: number; newText: string }>)].sort((a, b) => a.matchIndex - b.matchIndex);
@@ -7111,7 +7348,7 @@ function renderEditPreviewBody(
 	if (operations.length === 1) {
 		const [diff] = diffs;
 		const line = lines[0] ?? getFirstChangedNewLine(diff);
-		renderSplit(diff, language, ctx.expanded ? MAX_PREVIEW_LINES : 32, dc, branchWidth)
+		renderSplit(diff, language, ctx.expanded ? MAX_RENDER_LINES : diffCollapsedLimit(), dc, branchWidth)
 			.then((rendered) => {
 				if (ctx.state._pk !== key) return;
 				ctx.state._ptBody = `${summarizeDiff(diff.added, diff.removed)}${formatLineMeta(line, theme)}\n${rendered}`;
@@ -7184,12 +7421,12 @@ function trackThinkingBlockEvents(event: any, ctx?: any): void {
 		} catch { /* noop */ }
 		// Pi may call AssistantMessageComponent.updateContent before extension
 		// handlers run on the same thinking_end event — nudge one more frame.
-		setTimeout(() => {
+		unrefTimer(setTimeout(() => {
 			try {
 				ctx?.ui?.invalidate?.();
 				ctx?.ui?.requestRender?.();
 			} catch { /* noop */ }
-		}, 0);
+		}, 0));
 	}
 
 	if (evt.type === "thinking_start") {
@@ -7283,7 +7520,6 @@ function registerThinkingLabels(pi: ExtensionAPI): void {
 	});
 	pi.on("message_update", async (event, ctx) => {
 		trackThinkingBlockEvents(event, ctx);
-		patchMessage(event, ctx.ui?.theme);
 	});
 	pi.on("message_end", async (event, ctx) => {
 		const message = (event as any)?.message;
@@ -8123,7 +8359,11 @@ function parseApplyPatchPreview(patchText: string, sp: (path: string) => string,
 		let sourceContent: string | undefined;
 		if (kind === "update") {
 			try {
-				sourceContent = readFileSync(resolve(cwd, path), "utf8");
+				const full = resolveToolPath(cwd, path);
+				const st = statSync(full);
+				if (st.isFile() && st.size <= 2_000_000) {
+					sourceContent = readFileSync(full, "utf8");
+				}
 			} catch {
 				sourceContent = undefined;
 			}
@@ -8364,7 +8604,7 @@ function renderMcpToolResult(result: any, expanded: boolean, isPartial: boolean,
 	setToolStatus(ctx, ctx.isError ? "error" : "success");
 
 	const mode = getMode(readSettings().mcpOutputMode, ["hidden", "summary", "preview"] as const, "preview");
-	if (mode === "hidden") return makeText(ctx.lastComponent, "");
+	if (mode === "hidden" && !ctx.isError && !expanded) return makeText(ctx.lastComponent, "");
 
 	const raw = getTextContent(result).trim();
 	const lines = raw ? raw.split("\n") : [];
@@ -8373,15 +8613,24 @@ function renderMcpToolResult(result: any, expanded: boolean, isPartial: boolean,
 	}
 
 	const statusText = ctx.isError ? theme.fg("error", lines[0]) : theme.fg("muted", `${lines.length} line${lines.length === 1 ? "" : "s"} returned`);
-	if (mode === "summary") return makeText(ctx.lastComponent, withBranch(statusText, theme));
-	if (!expanded) return makeText(ctx.lastComponent, withBranch(`${statusText}${toolOutputDetailHint(theme, expanded)}`, theme));
+	if (!expanded && mode === "summary") return makeText(ctx.lastComponent, withBranch(statusText, theme));
+	if (!expanded) {
+		const hint = ctx.isError && lines.length === 1 ? "" : toolOutputDetailHint(theme, expanded);
+		return makeText(ctx.lastComponent, withBranch(`${statusText}${hint}`, theme));
+	}
+	if (ctx.isError) {
+		const errorText = lines.length === 1
+			? statusText
+			: buildPreviewText(lines, true, theme, previewLimit(), lines.length, (line) => theme.fg("error", line || " "));
+		return makeText(ctx.lastComponent, withBranch(errorText, theme));
+	}
 	const preview = buildPreviewText(
 		lines,
 		true,
 		theme,
 		previewLimit(),
 		lines.length,
-		(line) => theme.fg(ctx.isError ? "error" : "dim", line || " "),
+		(line) => theme.fg("dim", line || " "),
 	);
 	return makeText(ctx.lastComponent, withBranch(`${statusText}\n${preview}`, theme));
 }
@@ -8636,23 +8885,29 @@ function renderOpenAiToolResult(name: string, result: any, expanded: boolean, is
 		? theme.fg("error", lines[0])
 		: theme.fg("muted", `${lines.length} line${lines.length === 1 ? "" : "s"} returned`);
 	if (!expanded) {
-		return makeText(ctx.lastComponent, withBranch(`${statusText}${toolOutputDetailHint(theme, expanded)}`, theme));
+		const hint = ctx.isError && lines.length === 1 ? "" : toolOutputDetailHint(theme, expanded);
+		return makeText(ctx.lastComponent, withBranch(`${statusText}${hint}`, theme));
 	}
 
-	if (!ctx.isError && lines.length === 1) {
+	if (ctx.isError) {
+		const errorText = lines.length === 1
+			? statusText
+			: buildPreviewText(lines, true, theme, previewLimit(), lines.length, (line) => theme.fg("error", line || " "));
+		return makeText(ctx.lastComponent, withBranch(errorText, theme));
+	}
+
+	if (lines.length === 1) {
 		return makeText(ctx.lastComponent, withBranch(formatOpenAiSuccessLine(name, lines[0], theme), theme));
 	}
 
-	const preview = lines.length === 1
-		? theme.fg(ctx.isError ? "error" : "dim", lines[0])
-		: buildPreviewText(
-			lines,
-			true,
-			theme,
-			previewLimit(),
-			lines.length,
-			(line) => theme.fg(ctx.isError ? "error" : "dim", line || " "),
-		);
+	const preview = buildPreviewText(
+		lines,
+		true,
+		theme,
+		previewLimit(),
+		lines.length,
+		(line) => theme.fg("dim", line || " "),
+	);
 	return makeText(ctx.lastComponent, withBranch(`${statusText}\n${preview}`, theme));
 }
 
@@ -8794,24 +9049,41 @@ export default function (pi: ExtensionAPI) {
 	registerThinkingLabels(pi);
 	syncExtraToolDetailMode();
 
+	const scopeTag = (res: WriteSettingsResult): string => (res.scope === "project" ? " (in .pi/settings.json)" : "");
+	const commandCwd = (ctx: any): string => {
+		const cmdCwd = effectiveSettingsCwd(ctx?.cwd);
+		if (ctx?.cwd) activeSettingsCwd = ctx.cwd;
+		return cmdCwd;
+	};
+	const notifyWriteError = (ctx: any, key: string, res: WriteSettingsResult): void => {
+		if (ctx.hasUI) ctx.ui.notify(`Could not update ${key} in ${res.path}`, "error");
+	};
+
 	pi.registerShortcut("ctrl+shift+o", {
 		description: "Toggle extra tool output detail",
 		handler: async (ctx) => {
-			setExtraToolDetailMode(!extraToolOutputExpanded);
+			const cmdCwd = commandCwd(ctx);
+			const current = readSettings(cmdCwd).extraToolOutputExpanded === true;
+			const writeRes = setExtraToolDetailMode(!current, cmdCwd);
+			if (!writeRes.ok) {
+				notifyWriteError(ctx, "extraToolOutputExpanded", writeRes);
+				return;
+			}
 			if (ctx.hasUI) {
 				ctx.ui.setToolsExpanded(ctx.ui.getToolsExpanded());
-				ctx.ui.notify(`Extra tool detail: ${extraToolOutputExpanded ? "on" : "off"}`, "info");
+				ctx.ui.notify(`Extra tool detail: ${extraToolOutputExpanded ? "on" : "off"}${scopeTag(writeRes)}`, "info");
 			}
 		},
 	});
 
 	// /cc-tools command — control tool chrome, grouping, and detail level.
 	const TOOL_MODES = ["outlines", "transparent", "default"] as const;
+	const TOOL_STYLE_MODES = [...TOOL_MODES, "border"] as const;
 	const TOOL_BOOL_MODES = ["on", "off", "toggle", "status"] as const;
 	const TOOL_SUBCOMMANDS = [...TOOL_MODES, "group", "detail", "thinking", "intent", "status"] as const;
 	const INTENT_DESCRIPTIONS: Record<string, string> = {
-		off: "No labels on bash rows (default)",
-		model: "The model writes a short purpose with each bash call (adds a field to the bash tool and a line to its instructions)",
+		off: "No labels on bash rows",
+		model: "The model writes a short purpose with each bash call (default; adds a field to the bash tool and a line to its instructions)",
 		local: "Apple's on-device model writes the purpose on this Mac; nothing the model sees changes (macOS 26+, Apple silicon)",
 		status: "Show the current mode",
 	};
@@ -8823,13 +9095,17 @@ export default function (pi: ExtensionAPI) {
 		if (mode === "status") return "status";
 		return undefined;
 	};
-	const notifyToolStatus = (ctx: any): void => {
+	const notifyToolStatus = (ctx: any, cmdCwd = commandCwd(ctx)): void => {
 		if (!ctx.hasUI) return;
+		syncToolBackgroundMode(cmdCwd);
+		syncExtraToolDetailMode(cmdCwd);
+		const savedIntent = normalizeBashIntentMode(readSettings(cmdCwd).bashIntent);
+		const intentPending = savedIntent !== bashIntentMode ? ` (saved: ${savedIntent}, applies after /reload)` : "";
 		ctx.ui.notify([
 			`Tool style: ${toolBackgroundMode}`,
-			`Tool grouping: ${toolGroupingEnabled() ? "on" : "off"}`,
-			`Thinking: ${getThinkingMode()}`,
-			`Bash labels: ${bashIntentMode}`,
+			`Tool grouping: ${toolGroupingEnabled(cmdCwd) ? "on" : "off"}`,
+			`Thinking: ${getThinkingMode(cmdCwd)}`,
+			`Bash labels: ${bashIntentMode}${intentPending}`,
 			`Extra detail: ${extraToolOutputExpanded ? "on" : "off"} (${rawKeyHint("ctrl+shift+o", "toggle")})`,
 		].join("\n"), "info");
 	};
@@ -8884,28 +9160,35 @@ export default function (pi: ExtensionAPI) {
 			return [];
 		},
 		async handler(args, ctx) {
+			const cmdCwd = commandCwd(ctx);
 			const parts = args.trim().toLowerCase().split(/\s+/).filter(Boolean);
 			const sub = parts[0] ?? "";
 			if (!sub || sub === "status") {
-				notifyToolStatus(ctx);
+				notifyToolStatus(ctx, cmdCwd);
 				return;
 			}
 
 			if (sub === "group") {
-				const next = booleanMode(parts[1], toolGroupingEnabled());
+				const current = toolGroupingEnabled(cmdCwd);
+				const next = booleanMode(parts[1], current);
 				if (next === undefined) {
 					if (ctx.hasUI) ctx.ui.notify(`Usage: /cc-tools group ${TOOL_BOOL_MODES.join("|")}`, "error");
 					return;
 				}
 				if (next === "status") {
-					if (ctx.hasUI) ctx.ui.notify(`Tool grouping: ${toolGroupingEnabled() ? "on" : "off"}`, "info");
+					if (ctx.hasUI) ctx.ui.notify(`Tool grouping: ${current ? "on" : "off"}`, "info");
 					return;
 				}
-				setToolGroupingEnabled(next);
-				if (!next) ungroupActiveToolGroups();
+				const writeRes = setToolGroupingEnabled(next, cmdCwd);
+				if (!writeRes.ok) {
+					notifyWriteError(ctx, "groupToolCalls", writeRes);
+					return;
+				}
+				const effective = toolGroupingEnabled(cmdCwd);
+				if (!effective) ungroupActiveToolGroups();
 				if (ctx.hasUI) {
 					ctx.ui.setToolsExpanded(ctx.ui.getToolsExpanded());
-					ctx.ui.notify(`Tool grouping: ${next ? "on" : "off"}${next ? " (future adjacent tool rows)" : ""}`, "info");
+					ctx.ui.notify(`Tool grouping: ${effective ? "on" : "off"}${effective ? " (future adjacent tool rows)" : ""}${scopeTag(writeRes)}`, "info");
 				}
 				return;
 			}
@@ -8913,7 +9196,7 @@ export default function (pi: ExtensionAPI) {
 
 			if (sub === "intent") {
 				const arg = parts[1] ?? "status";
-				const saved = normalizeBashIntentMode(readSettings().bashIntent);
+				const saved = normalizeBashIntentMode(readSettings(cmdCwd).bashIntent);
 				if (arg === "status") {
 					const pending = saved !== bashIntentMode ? ` Saved: ${saved}, applies after /reload.` : "";
 					if (ctx.hasUI) ctx.ui.notify(`Bash labels: ${bashIntentMode} (off, model or local).${pending}`, "info");
@@ -8924,15 +9207,19 @@ export default function (pi: ExtensionAPI) {
 					return;
 				}
 				const next = arg as BashIntentMode;
-				writeSettingsKey("bashIntent", next);
+				const writeRes = writeSettingsKey("bashIntent", next, { cwd: cmdCwd });
+				if (!writeRes.ok) {
+					notifyWriteError(ctx, "bashIntent", writeRes);
+					return;
+				}
 				if (!ctx.hasUI) return;
 				const unsupported = next === "local" ? localIntentUnsupportedReason() : undefined;
 				if (unsupported) {
-					ctx.ui.notify(`Bash labels → local saved, but ${unsupported}; it will stay off here.`, "warning");
+					ctx.ui.notify(`Bash labels → local saved${scopeTag(writeRes)}, but ${unsupported}; it will stay off here.`, "warning");
 				} else if (next === bashIntentMode) {
-					ctx.ui.notify(`Bash labels: ${next} (already active)`, "info");
+					ctx.ui.notify(`Bash labels: ${next} (already active)${scopeTag(writeRes)}`, "info");
 				} else {
-					ctx.ui.notify(`Bash labels → ${next}. Applies after /reload or on the next start.`, "info");
+					ctx.ui.notify(`Bash labels → ${next}${scopeTag(writeRes)}. Applies after /reload or on the next start.`, "info");
 				}
 				return;
 			}
@@ -8940,28 +9227,34 @@ export default function (pi: ExtensionAPI) {
 			if (sub === "thinking") {
 				const arg = (parts[1] ?? "status").toLowerCase();
 				if (arg === "status" || !arg) {
-					if (ctx.hasUI) ctx.ui.notify(`Thinking: ${getThinkingMode()} (live = only streaming thinking expands; full = always expanded; latest = only the latest message keeps its thinking)`, "info");
+					if (ctx.hasUI) ctx.ui.notify(`Thinking: ${getThinkingMode(cmdCwd)} (live = only streaming thinking expands; full = always expanded; latest = only the latest message keeps its thinking)`, "info");
 					return;
 				}
 				if (!(THINKING_MODES as readonly string[]).includes(arg)) {
 					if (ctx.hasUI) ctx.ui.notify(`Usage: /cc-tools thinking ${THINKING_MODES.join("|")}|status`, "error");
 					return;
 				}
-				writeSettingsKey("thinkingMode", arg);
+				const writeRes = writeSettingsKey("thinkingMode", arg, { cwd: cmdCwd });
+				if (!writeRes.ok) {
+					notifyWriteError(ctx, "thinkingMode", writeRes);
+					return;
+				}
+				const effective = getThinkingMode(cmdCwd);
 				applyThinkingModeToChats();
 				if (ctx.hasUI) {
 					ctx.ui.setToolsExpanded(ctx.ui.getToolsExpanded());
 					requestChatRender(ctx);
-					ctx.ui.notify(`Thinking → ${arg}${
-						arg === "live" ? " (only the active thinking expands)"
-						: arg === "full" ? " (thinking always expanded)"
+					ctx.ui.notify(`Thinking → ${effective}${
+						effective === "live" ? " (only the active thinking expands)"
+						: effective === "full" ? " (thinking always expanded)"
 						: " (only the latest message keeps its thinking)"
-					}`, "info");
+					}${scopeTag(writeRes)}`, "info");
 				}
 				return;
 			}
 
 			if (sub === "detail" || sub === "extra") {
+				syncExtraToolDetailMode(cmdCwd);
 				const next = booleanMode(parts[1], extraToolOutputExpanded);
 				if (next === undefined) {
 					if (ctx.hasUI) ctx.ui.notify(`Usage: /cc-tools detail ${TOOL_BOOL_MODES.join("|")}`, "error");
@@ -8971,24 +9264,36 @@ export default function (pi: ExtensionAPI) {
 					if (ctx.hasUI) ctx.ui.notify(`Extra tool detail: ${extraToolOutputExpanded ? "on" : "off"}`, "info");
 					return;
 				}
-				setExtraToolDetailMode(next);
+				const writeRes = setExtraToolDetailMode(next, cmdCwd);
+				if (!writeRes.ok) {
+					notifyWriteError(ctx, "extraToolOutputExpanded", writeRes);
+					return;
+				}
 				if (ctx.hasUI) {
 					ctx.ui.setToolsExpanded(ctx.ui.getToolsExpanded());
-					ctx.ui.notify(`Extra tool detail: ${extraToolOutputExpanded ? "on" : "off"}`, "info");
+					ctx.ui.notify(`Extra tool detail: ${extraToolOutputExpanded ? "on" : "off"}${scopeTag(writeRes)}`, "info");
 				}
 				return;
 			}
 
-			if (!(TOOL_MODES as readonly string[]).includes(sub)) {
+			if (!(TOOL_STYLE_MODES as readonly string[]).includes(sub)) {
 				if (ctx.hasUI) ctx.ui.notify(`Unknown option "${sub}". Try /cc-tools status, /cc-tools thinking live, or /cc-tools group toggle.`, "error");
 				return;
 			}
-			toolBackgroundOverride = sub as typeof toolBackgroundMode;
-			toolBackgroundMode = toolBackgroundOverride;
-			writeSettingsKey("toolBackground", sub);
+			const nextStyle: typeof toolBackgroundMode = sub === "border" ? "outlines" : (sub as typeof toolBackgroundMode);
+			const writeRes = writeSettingsKey("toolBackground", nextStyle, { cwd: cmdCwd });
+			if (!writeRes.ok) {
+				notifyWriteError(ctx, "toolBackground", writeRes);
+				return;
+			}
+			toolBackgroundOverride = nextStyle;
+			toolBackgroundMode = nextStyle;
+			bumpToolBranchVisualEpoch();
 			if (ctx.hasUI) {
 				applyToolBackgroundMode(ctx.ui.theme);
-				ctx.ui.notify(`Tool style → ${sub}`, "info");
+				(ctx.ui as any).invalidate?.();
+				requestChatRender(ctx);
+				ctx.ui.notify(`Tool style → ${nextStyle}${scopeTag(writeRes)}`, "info");
 			}
 		},
 	});
@@ -8997,13 +9302,14 @@ export default function (pi: ExtensionAPI) {
 	// /cc-theme terminal — make pi's theme follow the terminal's palette.
 	const THEME_MODES = ["on", "off", "toggle", "status", "terminal"] as const;
 	const TERMINAL_MODES = ["on", "off", "toggle", "status"] as const;
-	const handleTerminalTheme = (arg: string, ctx: any): void => {
-		const current = terminalThemeEnabled();
+	const handleTerminalTheme = (arg: string, ctx: any, cmdCwd: string): void => {
+		const current = terminalThemeEnabled(cmdCwd);
 		if (!arg || arg === "status") {
 			if (!ctx.hasUI) return;
 			const name = activeThemeName(ctx.ui) ?? "unknown";
-			const previous = readSettings().terminalThemePrevious;
-			const isDefault = readSettings().terminalTheme === undefined;
+			const settings = readSettings(cmdCwd);
+			const previous = settings.terminalThemePrevious;
+			const isDefault = settings.terminalTheme === undefined;
 			ctx.ui.notify([
 				`Terminal colors: ${current ? "on" : "off"}${isDefault ? " (default)" : ""} (pi theme "${name}")`,
 				current && previous ? `  /cc-theme terminal off restores "${previous}"` : "",
@@ -9020,22 +9326,30 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 		if (next) {
-			const prior = readSettings().terminalTheme;
-			writeSettingsKey("terminalTheme", true);
+			const prior = readSettings(cmdCwd).terminalTheme;
+			const writeRes = writeSettingsKey("terminalTheme", true, { cwd: cmdCwd });
+			if (!writeRes.ok) {
+				notifyWriteError(ctx, "terminalTheme", writeRes);
+				return;
+			}
 			if (!applyTerminalTheme(ctx, { announce: false, reportUnavailable: true })) {
-				writeSettingsKey("terminalTheme", prior);
+				writeSettingsKey("terminalTheme", prior, { cwd: cmdCwd, scope: writeRes.scope });
 				return;
 			}
 			requestTerminalColorScheme();
-			if (ctx.hasUI) ctx.ui.notify("Terminal colors: on — pi's theme now follows the terminal (Ghostty, Rex, ...)", "info");
+			if (ctx.hasUI) ctx.ui.notify(`Terminal colors: on${scopeTag(writeRes)} — pi's theme now follows the terminal (Ghostty, Rex, ...)`, "info");
 		} else {
 			// Explicit false: unset means on (the default).
-			writeSettingsKey("terminalTheme", false);
+			const writeRes = writeSettingsKey("terminalTheme", false, { cwd: cmdCwd });
+			if (!writeRes.ok) {
+				notifyWriteError(ctx, "terminalTheme", writeRes);
+				return;
+			}
 			const restored = restorePreviousTheme(ctx);
 			if (ctx.hasUI) {
 				ctx.ui.notify(restored
-					? `Terminal colors: off — restored theme "${restored}"`
-					: "Terminal colors: off — pick a theme with /settings", "info");
+					? `Terminal colors: off${scopeTag(writeRes)} — restored theme "${restored}"`
+					: `Terminal colors: off${scopeTag(writeRes)} — pick a theme with /settings`, "info");
 			}
 		}
 	};
@@ -9070,21 +9384,22 @@ export default function (pi: ExtensionAPI) {
 				}));
 		},
 		async handler(args, ctx) {
+			const cmdCwd = commandCwd(ctx);
 			const raw = args.trim().toLowerCase();
 			if (raw === "terminal" || raw.startsWith("terminal ")) {
-				handleTerminalTheme(raw.slice("terminal".length).trim(), ctx);
+				handleTerminalTheme(raw.slice("terminal".length).trim(), ctx, cmdCwd);
 				return;
 			}
-			const current = themeAdaptiveEnabled();
+			const current = themeAdaptiveEnabled(cmdCwd);
 
 			if (!raw || raw === "status") {
 				if (!ctx.hasUI) return;
 				const theme = ctx.ui.theme as any;
 				const themeName = theme?.name ?? "unknown";
 				const state = current ? "on" : "off";
-				const terminalLine = `terminal colors: ${terminalThemeEnabled() ? "on" : "off"} (/cc-theme terminal on|off)`;
+				const terminalLine = `terminal colors: ${terminalThemeEnabled(cmdCwd) ? "on" : "off"} (/cc-theme terminal on|off)`;
 				if (raw === "status" && current) {
-					const settings = readSettings();
+					const settings = readSettings(cmdCwd);
 					const verbKey = settings.spinnerVerbColor || "borderAccent";
 					const statusKey = settings.spinnerStatusColor || "muted";
 					const verbAnsi = safeFgAnsi(theme, verbKey) ?? safeFgAnsi(theme, "accent");
@@ -9115,20 +9430,28 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			writeSettingsKey("themeAdaptive", next);
+			const writeRes = writeSettingsKey("themeAdaptive", next, { cwd: cmdCwd });
+			if (!writeRes.ok) {
+				notifyWriteError(ctx, "themeAdaptive", writeRes);
+				return;
+			}
+			const effective = themeAdaptiveEnabled(cmdCwd);
 			bustSpinnerSettingsCache();
 			// Invalidate caches so the next render re-derives from the active
 			// theme (or falls back to the fixed Claude palette).
 			invalidateThemePaletteCache();
 			autoDerivePending = true;
-			if (next) {
+			if (effective) {
 				if (ctx.hasUI) applyThemePaletteIfNeeded(ctx.ui.theme);
 			} else {
 				resetThemePalette();
 			}
+			bumpToolBranchVisualEpoch();
 			if (ctx.hasUI) {
-				const label = next ? "on — colors follow pi theme" : "off — fixed Claude palette";
-				ctx.ui.notify(`Theme adaptive: ${label}`, "info");
+				(ctx.ui as any).invalidate?.();
+				requestChatRender(ctx);
+				const label = effective ? "on — colors follow pi theme" : "off — fixed Claude palette";
+				ctx.ui.notify(`Theme adaptive: ${label}${scopeTag(writeRes)}`, "info");
 			}
 		},
 	});
@@ -9166,15 +9489,16 @@ export default function (pi: ExtensionAPI) {
 				const keyPrefix = (parts[1] ?? "").toLowerCase();
 				return COMMON_COLOR_KEYS
 					.filter((k) => k.toLowerCase().startsWith(keyPrefix))
-					.map((k) => ({ value: k, label: k, description: `theme.fg("${k}", …)` }));
+					.map((k) => ({ value: `${parts[0]} ${k}`, label: k, description: `theme.fg("${k}", …)` }));
 			}
 			return [];
 		},
 		async handler(args, ctx) {
+			const cmdCwd = commandCwd(ctx);
 			const parts = args.trim().split(/\s+/).filter((p) => p.length > 0);
 			const sub = (parts[0] ?? "").toLowerCase();
 			const theme = ctx.hasUI ? (ctx.ui.theme as any) : null;
-			const settings = readSettings();
+			const settings = readSettings(cmdCwd);
 			const currentVerb = settings.spinnerVerbColor || "borderAccent";
 			const currentStatus = settings.spinnerStatusColor || "muted";
 
@@ -9191,7 +9515,10 @@ export default function (pi: ExtensionAPI) {
 				];
 				for (const key of COMMON_COLOR_KEYS) {
 					const ansi = safeFgAnsi(theme, key);
-					const marker = key === currentVerb ? "(verb)" : key === currentStatus ? "(status)" : "";
+					const marker = key === currentVerb && key === currentStatus ? "(verb, status)"
+						: key === currentVerb ? "(verb)"
+						: key === currentStatus ? "(status)"
+						: "";
 					const sample = ansi ? `${ansi}Cooking…\x1b[39m` : "(unmapped)";
 					lines.push(`  ${key.padEnd(16)} ${sample} ${marker}`);
 				}
@@ -9200,10 +9527,26 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (sub === "reset") {
-				writeSettingsKey("spinnerVerbColor", undefined);
-				writeSettingsKey("spinnerStatusColor", undefined);
+				const clearedProject = hasProjectSettingKey("spinnerVerbColor", cmdCwd) || hasProjectSettingKey("spinnerStatusColor", cmdCwd);
+				const u1 = writeSettingsKey("spinnerVerbColor", undefined, { cwd: cmdCwd, scope: "user" });
+				const u2 = writeSettingsKey("spinnerStatusColor", undefined, { cwd: cmdCwd, scope: "user" });
+				let p1: WriteSettingsResult | undefined;
+				let p2: WriteSettingsResult | undefined;
+				if (hasProjectSettingKey("spinnerVerbColor", cmdCwd)) {
+					p1 = writeSettingsKey("spinnerVerbColor", undefined, { cwd: cmdCwd, scope: "project" });
+				}
+				if (hasProjectSettingKey("spinnerStatusColor", cmdCwd)) {
+					p2 = writeSettingsKey("spinnerStatusColor", undefined, { cwd: cmdCwd, scope: "project" });
+				}
 				bustSpinnerSettingsCache();
-				if (ctx.hasUI) ctx.ui.notify("Spinner colors reset to defaults (verb=borderAccent, status=muted)", "info");
+				if (!u1.ok || !u2.ok || (p1 && !p1.ok) || (p2 && !p2.ok)) {
+					const failed = [u1, u2, p1, p2].find((res) => res && !res.ok)!;
+					notifyWriteError(ctx, "spinnerVerbColor/spinnerStatusColor", failed);
+					return;
+				}
+				if (ctx.hasUI) {
+					ctx.ui.notify(`Spinner colors reset to defaults (verb=borderAccent, status=muted)${clearedProject ? " (cleared user and .pi/settings.json)" : ""}`, "info");
+				}
 				return;
 			}
 
@@ -9222,17 +9565,24 @@ export default function (pi: ExtensionAPI) {
 			// accept anyway if the user insists so themes with custom keys work.
 			const ansi = theme ? safeFgAnsi(theme, key) : null;
 			const settingKey = sub === "verb" ? "spinnerVerbColor" : "spinnerStatusColor";
-			writeSettingsKey(settingKey, key);
+			const writeRes = writeSettingsKey(settingKey, key, { cwd: cmdCwd });
 			bustSpinnerSettingsCache();
+			if (!writeRes.ok) {
+				notifyWriteError(ctx, settingKey, writeRes);
+				return;
+			}
 			if (ctx.hasUI) {
 				const sample = ansi ? `${ansi}sample\x1b[39m` : "(key unmapped in current theme)";
-				ctx.ui.notify(`Spinner ${sub} → ${key} ${sample}`, "info");
+				ctx.ui.notify(`Spinner ${sub} → ${key} ${sample}${scopeTag(writeRes)}`, "info");
 			}
 		},
 	});
 
 	pi.on("session_start", async (event, ctx) => {
 		clearRtkRewriteState();
+		if (ctx?.cwd) activeSettingsCwd = ctx.cwd;
+		syncExtraToolDetailMode(ctx?.cwd);
+		syncToolBackgroundMode(ctx?.cwd);
 		if (!ctx.hasUI) return;
 		intentNoticeUi = ctx.ui;
 		if (localIntentProblem && !localIntentProblemShown) {
@@ -9244,8 +9594,8 @@ export default function (pi: ExtensionAPI) {
 		installPromptMarkerEditor(ctx);
 		// terminalTheme (on by default): switch to, and stay on, the theme built from the
 		// terminal's palette. `pi --use-theme <name>` still wins for that run.
-		if (terminalThemeEnabled() && !(themeChosenOnCommandLine() && activeThemeName(ctx.ui) !== SYSTEM_THEME_NAME)) {
-			applyTerminalTheme(ctx, { announce: true, reportUnavailable: readSettings().terminalTheme === true });
+		if (terminalThemeEnabled(ctx?.cwd) && !(themeChosenOnCommandLine() && activeThemeName(ctx.ui) !== SYSTEM_THEME_NAME)) {
+			applyTerminalTheme(ctx, { announce: true, reportUnavailable: readSettings(ctx?.cwd).terminalTheme === true });
 		}
 		// Session switch (/resume, /new) can leave tool chrome from the previous
 		// theme; rebind from ctx.ui.theme (other extensions may setTheme in the
@@ -9261,6 +9611,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("turn_start", async (_event, ctx) => {
+		if (ctx?.cwd) activeSettingsCwd = ctx.cwd;
 		if (!ctx.hasUI) return;
 		patchUiNotifications(ctx.ui);
 		patchAgentWidget(ctx.ui);
@@ -9268,30 +9619,47 @@ export default function (pi: ExtensionAPI) {
 		applyThemePaletteIfNeeded(ctx.ui.theme);
 	});
 
-	pi.on("message_update", async (event) => {
-		const content = (event as any)?.message?.content;
-		const hasText = Array.isArray(content) && content.some((block: any) => block?.type === "text" && typeof block.text === "string" && block.text.trim().length > 0);
-		if (hasText) clearPreservedBashPreviews();
-	});
-
 	pi.on("tool_execution_start", async (event) => {
-		clearPreservedBashPreviews();
 		const toolName = (event as any)?.toolName;
 		if (toolName !== "bash") return;
 		trackRtkOriginalBashCommand((event as any)?.toolCallId, (event as any)?.args);
 	});
 
 	const cwd = process.cwd();
-	const sp = (path: string) => shortPath(cwd, path);
+	const createCwdToolResolver = <T>(baseCwd: string, defaultTool: T, factory: (targetCwd: string) => T): ((targetCwd?: string) => T) => {
+		const cache = new Map<string, T>();
+		cache.set(baseCwd, defaultTool);
+		return (targetCwd?: string) => {
+			const effective = targetCwd || baseCwd;
+			const cached = cache.get(effective);
+			if (cached) return cached;
+			const created = factory(effective);
+			cache.set(effective, created);
+			while (cache.size > 8) {
+				const oldest = cache.keys().next().value;
+				if (oldest === undefined || oldest === baseCwd) break;
+				cache.delete(oldest);
+			}
+			return created;
+		};
+	};
+	const spFor = (ctx: any) => {
+		const base = ctx?.cwd ?? cwd;
+		return (path: string) => shortPath(base, path);
+	};
 
 	const readTool = createReadToolDefinition(cwd);
+	const getReadTool = createCwdToolResolver(cwd, readTool, createReadToolDefinition);
 	pi.registerTool({
 		...readTool,
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
+			return (getReadTool(ctx?.cwd).execute as (...args: unknown[]) => ReturnType<typeof readTool.execute>)(toolCallId, params, signal, onUpdate, ctx);
+		},
 		renderCall(args, theme, ctx) {
 			syncToolCallStatus(ctx);
 			// SKILL.md reads: render as [skill] block matching /skill:name style
 			const rawPath = String(args?.path ?? "");
-			const absPath = resolve(ctx.cwd ?? cwd, rawPath);
+			const absPath = resolveToolPath(ctx.cwd ?? cwd, rawPath);
 			if (basename(absPath) === "SKILL.md") {
 				const skillName = basename(dirname(absPath)) || "SKILL.md";
 				const line =
@@ -9299,6 +9667,7 @@ export default function (pi: ExtensionAPI) {
 					theme.fg("customMessageText", skillName);
 				return makeText(ctx.lastComponent, `${toolStatusDot(ctx, theme)}${line}${liveLineCountTrailing(ctx, theme)}`);
 			}
+			const sp = spFor(ctx);
 			const summary = stableCallSummary(ctx, "_callSummary", () => {
 				let value = sp(args.path ?? "");
 				if (args.offset || args.limit) {
@@ -9329,9 +9698,12 @@ export default function (pi: ExtensionAPI) {
 				const message = content.text.trim().split("\n");
 				return makeText(ctx.lastComponent, withBranch(theme.fg("error", expanded ? message.join("\n") : message[0] ?? "Error"), theme));
 			}
+			const mode = readOutputMode();
+			if (!expanded && mode === "hidden") return makeText(ctx.lastComponent, "");
 			const lines = content.text.split("\n");
 			let text = theme.fg("muted", `${lines.length} lines loaded`);
 			if (details?.truncation?.truncated) text += theme.fg("warning", " (truncated)");
+			if (!expanded && mode === "summary") return makeText(ctx.lastComponent, withBranch(text, theme));
 			if (!expanded) return makeText(ctx.lastComponent, withBranch(`${text}${toolOutputDetailHint(theme, expanded)}`, theme));
 			text += `\n${buildPreviewText(lines, false, theme, previewLimit(), lines.length, (line) => theme.fg("dim", line || " "))}`;
 			return makeText(ctx.lastComponent, withBranch(text, theme));
@@ -9346,6 +9718,7 @@ export default function (pi: ExtensionAPI) {
 		} catch { /* session ended */ }
 	};
 	const bashTool = createBashToolDefinition(cwd);
+	const getBashTool = createCwdToolResolver(cwd, bashTool, createBashToolDefinition);
 	// Read once per load: "model" changes the bash tool and the model's instructions, which are
 	// fixed when the tool registers, so every mode switch applies on the next start or /reload.
 	const bashIntentMode: BashIntentMode = normalizeBashIntentMode(readSettings().bashIntent);
@@ -9357,6 +9730,10 @@ export default function (pi: ExtensionAPI) {
 		if (bashIntentMode === "model") return cleanIntentLabel(args?.displaySummary);
 		if (bashIntentMode !== "local") return "";
 		const command = typeof args?.command === "string" ? args.command : "";
+		if (!command) return "";
+		// Never hash/cache partial command prefixes while tool arguments are still streaming.
+		const settled = ctx?.argsComplete === true || ctx?.executionStarted === true || ctx?.state?._bashResultSeen === true;
+		if (!settled) return "";
 		const label = localIntentFor(command);
 		if (label) return label;
 		if (ctx?.executionStarted === true) {
@@ -9390,16 +9767,17 @@ export default function (pi: ExtensionAPI) {
 		parameters: bashIntentEnabled ? bashParameters : bashTool.parameters,
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			const { displaySummary: _displaySummary, ...bashParams } = params as typeof params & { displaySummary?: string };
+			const execCwd = ctx?.cwd || cwd;
 			// A command that only changes files: look at them before and after, so the row
 			// can show a diff like an edit/write row. The command itself runs unchanged.
 			const fileEdit = detectBashFileEdit(typeof bashParams.command === "string" ? bashParams.command : "");
 			// Local labels are asked for only here, when a command really runs, never on redraws.
 			if (bashIntentMode === "local" && typeof bashParams.command === "string") requestLocalIntent(bashParams.command);
-			const before = fileEdit ? snapshotBashFileEdit(cwd, fileEdit) : undefined;
-			const result = await bashTool.execute(toolCallId, bashParams, signal, onUpdate, ctx);
+			const before = fileEdit ? snapshotBashFileEdit(execCwd, fileEdit) : undefined;
+			const result = await getBashTool(execCwd).execute(toolCallId, bashParams, signal, onUpdate, ctx);
 			if (fileEdit && before) {
 				const details = result.details && typeof result.details === "object" ? result.details : {};
-				(result as any).details = { ...details, fileEdits: collectBashFileEdits(cwd, fileEdit, before) };
+				(result as any).details = { ...details, fileEdits: collectBashFileEdits(execCwd, fileEdit, before) };
 			}
 			return result;
 		},
@@ -9445,6 +9823,15 @@ export default function (pi: ExtensionAPI) {
 		},
 		renderResult(result, { expanded, isPartial }, theme, ctx) {
 			syncBashDuration(ctx, isPartial);
+			if (!isPartial && ctx.state && !ctx.state._bashResultSeen) {
+				ctx.state._bashResultSeen = true;
+				if (bashIntentMode === "local" && ctx.argsComplete !== true && ctx.executionStarted !== true) {
+					const cmd = typeof ctx.args?.command === "string" ? ctx.args.command : "";
+					if (cmd && localIntentFor(cmd)) {
+						unrefTimer(setTimeout(() => safeInvalidate(ctx), 0));
+					}
+				}
+			}
 			const details = result.details as BashToolDetails | undefined;
 			const rewrite = ensureRtkRewriteForContext(ctx, ctx.args);
 			const output = result.content[0]?.type === "text" ? result.content[0].text : "";
@@ -9477,29 +9864,27 @@ export default function (pi: ExtensionAPI) {
 					: running;
 				return makeText(ctx.lastComponent, withRewrite);
 			}
-			// Collapsed: only keep the live-preview tail (or nothing). Expanded: full list.
-			const keepTail = !expanded && liveToolPreviewEnabled() ? liveToolPreviewLimit() : undefined;
+			const mode = bashOutputMode();
 			// pi ends a non-zero exit with this line; the label shows the code, so it is not output.
 			const exit = ctx.isError ? output.match(/\s*Command exited with code (\d+)\s*$/) : null;
-			const nonEmpty = collectNonEmptyLines(exit ? output.slice(0, exit.index) : output, expanded ? undefined : (keepTail ?? 0));
+			const body = exit ? output.slice(0, exit.index) : output;
+			const nonEmpty = expanded
+				? collectNonEmptyLines(body)
+				: mode === "preview"
+					? collectNonEmptyLines(body, undefined, bashCollapsedLimit())
+					: collectNonEmptyLines(body, 0);
 			clearBlinkTimer(ctx);
 			setToolStatus(ctx, ctx.isError ? "error" : "success");
-			if (nonEmpty.total > 0 && ctx.state?._bashPreviewReleased !== true) {
-				preserveBashPreview(ctx);
-				if (ctx.state) ctx.state._bashPreviewReleased = true;
-			}
 			let text = ctx.isError ? theme.fg("error", exit ? `Exit ${exit[1]}` : "Failed") : theme.fg("success", "Done");
 			text += theme.fg("muted", ` (${nonEmpty.total} lines)`);
 			if (details?.truncation?.truncated) text += theme.fg("warning", " [truncated]");
-			const mode = bashOutputMode();
 			if (mode === "summary") return makeText(ctx.lastComponent, withBranch(text, theme));
-			const persistentPreview = shouldPreserveBashPreview(ctx) ? buildPersistentBashPreview(nonEmpty.lines, theme) : "";
 			if (!expanded && mode === "preview") {
 				const previewLines = nonEmpty.lines.slice(0, bashCollapsedLimit());
 				const preview = previewLines.length > 0
 					? buildPreviewText(previewLines, false, theme, bashCollapsedLimit(), nonEmpty.total, (line) => theme.fg("dim", line || " "))
 					: "";
-				const suffix = toolOutputDetailHint(theme, expanded);
+				const suffix = nonEmpty.total > 0 ? toolOutputDetailHint(theme, expanded) : "";
 				return makeText(ctx.lastComponent, withBranch(`${text}${suffix}${preview ? `\n${preview}` : ""}`, theme));
 			}
 			if (!expanded && mode === "opencode" && nonEmpty.total > 0) return makeText(ctx.lastComponent, withBranch(`${text}${toolOutputDetailHint(theme, expanded)}`, theme));
@@ -9512,6 +9897,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	const grepTool = createGrepTool(cwd);
+	const getGrepTool = createCwdToolResolver(cwd, grepTool, createGrepTool);
 	pi.registerTool({
 		name: "grep",
 		label: "grep",
@@ -9520,8 +9906,7 @@ export default function (pi: ExtensionAPI) {
 		promptGuidelines: (grepTool as any).promptGuidelines,
 		parameters: grepTool.parameters,
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
-			// Pi's typings for this tool lag its runtime, which reads ctx.cwd; forward ctx anyway.
-			return (grepTool.execute as (...args: unknown[]) => ReturnType<typeof grepTool.execute>)(toolCallId, params, signal, onUpdate, ctx);
+			return (getGrepTool(ctx?.cwd).execute as (...args: unknown[]) => ReturnType<typeof grepTool.execute>)(toolCallId, params, signal, onUpdate, ctx);
 		},
 		renderCall(args, theme, ctx) {
 			syncToolCallStatus(ctx);
@@ -9541,13 +9926,28 @@ export default function (pi: ExtensionAPI) {
 			}
 			clearBlinkTimer(ctx);
 			setToolStatus(ctx, ctx.isError ? "error" : "success");
+			if (ctx.isError) {
+				const raw = getTextContent(result).trim();
+				const errLines = raw ? raw.split("\n") : ["Search failed"];
+				if (!expanded) {
+					const hint = errLines.length > 1 ? toolOutputDetailHint(theme, expanded) : "";
+					return makeText(ctx.lastComponent, withBranch(`${theme.fg("error", errLines[0])}${hint}`, theme));
+				}
+				const errBody = errLines.length === 1
+					? theme.fg("error", errLines[0])
+					: buildPreviewText(errLines, true, theme, previewLimit(), errLines.length, (line) => theme.fg("error", line || " "));
+				return makeText(ctx.lastComponent, withBranch(errBody, theme));
+			}
+			const mode = searchOutputMode();
+			if (!expanded && mode === "hidden") return makeText(ctx.lastComponent, "");
 			const details = result.details as GrepToolDetails | undefined;
-			const matches = (result.content[0]?.type === "text" ? result.content[0].text : "")
+			const matches = getTextContent(result)
 				.split("\n")
 				.filter((line) => line.trim().length > 0);
 			if (matches.length === 0) return makeText(ctx.lastComponent, withBranch(theme.fg("muted", "no matches"), theme));
 			let text = theme.fg("muted", `${matches.length} matches`);
 			if (details?.truncation?.truncated) text += theme.fg("warning", " (truncated)");
+			if (!expanded && mode === "count") return makeText(ctx.lastComponent, withBranch(text, theme));
 			if (!expanded) return makeText(ctx.lastComponent, withBranch(`${text}${toolOutputDetailHint(theme, expanded)}`, theme));
 			text += `\n${buildPreviewText(matches, false, theme, previewLimit(), matches.length, (line) => theme.fg("dim", line))}`;
 			return makeText(ctx.lastComponent, withBranch(text, theme));
@@ -9555,6 +9955,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	const findTool = createFindTool(cwd);
+	const getFindTool = createCwdToolResolver(cwd, findTool, createFindTool);
 	pi.registerTool({
 		name: "find",
 		label: "find",
@@ -9563,7 +9964,7 @@ export default function (pi: ExtensionAPI) {
 		promptGuidelines: (findTool as any).promptGuidelines,
 		parameters: findTool.parameters,
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
-			return (findTool.execute as (...args: unknown[]) => ReturnType<typeof findTool.execute>)(toolCallId, params, signal, onUpdate, ctx);
+			return (getFindTool(ctx?.cwd).execute as (...args: unknown[]) => ReturnType<typeof findTool.execute>)(toolCallId, params, signal, onUpdate, ctx);
 		},
 		renderCall(args, theme, ctx) {
 			syncToolCallStatus(ctx);
@@ -9583,11 +9984,26 @@ export default function (pi: ExtensionAPI) {
 			}
 			clearBlinkTimer(ctx);
 			setToolStatus(ctx, ctx.isError ? "error" : "success");
-			const items = (result.content[0]?.type === "text" ? result.content[0].text : "")
+			if (ctx.isError) {
+				const raw = getTextContent(result).trim();
+				const errLines = raw ? raw.split("\n") : ["Find failed"];
+				if (!expanded) {
+					const hint = errLines.length > 1 ? toolOutputDetailHint(theme, expanded) : "";
+					return makeText(ctx.lastComponent, withBranch(`${theme.fg("error", errLines[0])}${hint}`, theme));
+				}
+				const errBody = errLines.length === 1
+					? theme.fg("error", errLines[0])
+					: buildPreviewText(errLines, true, theme, previewLimit(), errLines.length, (line) => theme.fg("error", line || " "));
+				return makeText(ctx.lastComponent, withBranch(errBody, theme));
+			}
+			const mode = searchOutputMode();
+			if (!expanded && mode === "hidden") return makeText(ctx.lastComponent, "");
+			const items = getTextContent(result)
 				.split("\n")
 				.filter((line) => line.trim().length > 0);
 			if (items.length === 0) return makeText(ctx.lastComponent, withBranch(theme.fg("muted", "no files found"), theme));
 			let text = theme.fg("muted", `${items.length} files`);
+			if (!expanded && mode === "count") return makeText(ctx.lastComponent, withBranch(text, theme));
 			if (!expanded) return makeText(ctx.lastComponent, withBranch(`${text}${toolOutputDetailHint(theme, expanded)}`, theme));
 			// Expanded: grouped find results with icons
 			const maxShow = previewLimit();
@@ -9608,6 +10024,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	const lsTool = createLsTool(cwd);
+	const getLsTool = createCwdToolResolver(cwd, lsTool, createLsTool);
 	pi.registerTool({
 		name: "ls",
 		label: "ls",
@@ -9616,10 +10033,11 @@ export default function (pi: ExtensionAPI) {
 		promptGuidelines: (lsTool as any).promptGuidelines,
 		parameters: lsTool.parameters,
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
-			return (lsTool.execute as (...args: unknown[]) => ReturnType<typeof lsTool.execute>)(toolCallId, params, signal, onUpdate, ctx);
+			return (getLsTool(ctx?.cwd).execute as (...args: unknown[]) => ReturnType<typeof lsTool.execute>)(toolCallId, params, signal, onUpdate, ctx);
 		},
 		renderCall(args, theme, ctx) {
 			syncToolCallStatus(ctx);
+			const sp = spFor(ctx);
 			const summary = stableCallSummary(ctx, "_callSummary", () => sp(args.path ?? "."));
 			return makeText(
 				ctx.lastComponent,
@@ -9632,7 +10050,19 @@ export default function (pi: ExtensionAPI) {
 			}
 			clearBlinkTimer(ctx);
 			setToolStatus(ctx, ctx.isError ? "error" : "success");
-			const items = (result.content[0]?.type === "text" ? result.content[0].text : "")
+			if (ctx.isError) {
+				const raw = getTextContent(result).trim();
+				const errLines = raw ? raw.split("\n") : ["List failed"];
+				if (!expanded) {
+					const hint = errLines.length > 1 ? toolOutputDetailHint(theme, expanded) : "";
+					return makeText(ctx.lastComponent, withBranch(`${theme.fg("error", errLines[0])}${hint}`, theme));
+				}
+				const errBody = errLines.length === 1
+					? theme.fg("error", errLines[0])
+					: buildPreviewText(errLines, true, theme, previewLimit(), errLines.length, (line) => theme.fg("error", line || " "));
+				return makeText(ctx.lastComponent, withBranch(errBody, theme));
+			}
+			const items = getTextContent(result)
 				.split("\n")
 				.filter((line) => line.trim().length > 0);
 			if (items.length === 0) return makeText(ctx.lastComponent, withBranch(theme.fg("muted", "empty directory"), theme));
@@ -9660,7 +10090,9 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	const MAX_WRITE_SNAPSHOT_BYTES = 2_000_000;
 	const writeTool = createWriteTool(cwd);
+	const getWriteTool = createCwdToolResolver(cwd, writeTool, createWriteTool);
 	pi.registerTool({
 		name: "write",
 		label: "write",
@@ -9669,35 +10101,55 @@ export default function (pi: ExtensionAPI) {
 		promptGuidelines: (writeTool as any).promptGuidelines,
 		parameters: writeTool.parameters,
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
+			const execCwd = ctx?.cwd || cwd;
 			const fp = params.path ?? (params as any).file_path ?? "";
-			const fullPath = fp ? resolve(cwd, fp) : "";
-			const existedBefore = !!fullPath && fileExistsForTool(cwd, fp);
+			const fullPath = fp ? resolveToolPath(execCwd, fp) : "";
+			const existedBefore = !!fullPath && fileExistsForTool(execCwd, fp);
 			WRITE_EXISTED_BEFORE.set(toolCallId, existedBefore);
 			// Drained by renderResult; without a UI nothing drains it, so keep the newest only.
 			trimOldestEntries(WRITE_EXISTED_BEFORE, RTK_TOOL_RECORD_LIMIT);
 			let old: string | null = null;
-			try {
-				if (fullPath && existedBefore) old = readFileSync(fullPath, "utf-8");
-			} catch {
-				old = null;
+			let previousSize: number | undefined;
+			if (fullPath && existedBefore) {
+				try {
+					const st = statSync(fullPath);
+					if (st.isFile()) {
+						previousSize = st.size;
+						if (st.size <= MAX_WRITE_SNAPSHOT_BYTES) {
+							old = await readFileAsync(fullPath, "utf-8");
+						}
+					}
+				} catch {
+					old = null;
+				}
 			}
-			const result = await (writeTool.execute as (...args: unknown[]) => ReturnType<typeof writeTool.execute>)(toolCallId, params, signal, onUpdate, ctx);
+			const result = await (getWriteTool(execCwd).execute as (...args: unknown[]) => ReturnType<typeof writeTool.execute>)(toolCallId, params, signal, onUpdate, ctx);
 			const content = params.content ?? "";
 			if (old !== null && old !== content) {
 				const diff = parseDiff(old, content);
 				(result as any).details = { _type: "diff", summary: summarizeDiff(diff.added, diff.removed), diff, language: lang(fp) };
-			} else if (old === null) {
-				(result as any).details = { _type: "new", lines: lineCount(content), filePath: fp };
-			} else if (old === content) {
+			} else if (old !== null && old === content) {
 				(result as any).details = { _type: "noChange" };
+			} else if (!existedBefore) {
+				(result as any).details = { _type: "new", lines: lineCount(content), filePath: fp };
+			} else {
+				(result as any).details = {
+					_type: "overwrite",
+					lines: lineCount(content),
+					filePath: fp,
+					snapshotSkipped: true,
+					...(previousSize !== undefined ? { previousBytes: previousSize } : {}),
+				};
 			}
 			return result;
 		},
 		renderCall(args, theme, ctx) {
+			const rowCwd = ctx.cwd ?? cwd;
+			const sp = spFor(ctx);
 			const fp = args?.path ?? (args as any)?.file_path ?? "";
 			const revealSummary = shouldRevealCallArgs(ctx) || (!!fp && hasOwnArg(args, "content"));
 			syncToolCallStatus(ctx);
-			const wasNew = getWriteWasNewFile(ctx, cwd, fp, revealSummary);
+			const wasNew = getWriteWasNewFile(ctx, rowCwd, fp, revealSummary);
 			const label = wasNew === true ? "Create" : "Write";
 			const summary = stableCallSummary(ctx, "_callSummary", () => {
 				const base = sp(fp);
@@ -9752,6 +10204,17 @@ export default function (pi: ExtensionAPI) {
 				return makeResponsiveDiffText(ctx, ctx.lastComponent, ctx.state._wdt ?? withBranch(richSummary, theme));
 			}
 			if (d?._type === "noChange") return makeText(ctx.lastComponent, withBranch(theme.fg("muted", "✓ no changes"), theme));
+			if (d?._type === "overwrite") {
+				const content = typeof ctx.args?.content === "string" ? ctx.args.content : "";
+				const lineTotal = typeof d.lines === "number" ? d.lines : lineCount(content);
+				const reason = typeof d.previousBytes === "number" && d.previousBytes > MAX_WRITE_SNAPSHOT_BYTES
+					? "diff skipped, previous file > 2 MB"
+					: "diff unavailable";
+				return makeText(
+					ctx.lastComponent,
+					withBranch(`${theme.fg("success", "Overwritten")} ${theme.fg("muted", `(${lineTotal} lines · ${reason})`)}`, theme),
+				);
+			}
 			if (d?._type === "new") {
 				const content = typeof ctx.args?.content === "string" ? ctx.args.content : "";
 				const lineTotal = typeof d.lines === "number" ? d.lines : lineCount(content);
@@ -9786,23 +10249,29 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	const editTool = createEditToolDefinition(cwd);
+	const getEditTool = createCwdToolResolver(cwd, editTool, createEditToolDefinition);
 	// The live preview and execute() share one look at the file, taken before the edit runs: what the row shows live is
 	// then exactly what is saved with the result, and so what it shows again after a resume.
-	const localizeEditOnce = (toolCallId: string, filePath: string, operations: Array<{ oldText: string; newText: string }>) => {
-		let localized = EDIT_LOCALIZED.get(toolCallId);
-		if (!localized) EDIT_LOCALIZED.set(toolCallId, localized = computeLocalizedEditDiffs(filePath, operations, cwd));
-		return localized;
+	const localizeEditOnce = (toolCallId: string, filePath: string, operations: Array<{ oldText: string; newText: string }>, baseCwd: string) => {
+		let entry = EDIT_LOCALIZED.get(toolCallId);
+		if (!entry || entry.baseCwd !== baseCwd) {
+			entry = { baseCwd, promise: computeLocalizedEditDiffs(filePath, operations, baseCwd) };
+			EDIT_LOCALIZED.set(toolCallId, entry);
+			trimOldestEntries(EDIT_LOCALIZED, RTK_TOOL_RECORD_LIMIT);
+		}
+		return entry.promise;
 	};
 	pi.registerTool({
 		...editTool,
 		// Pi's built-in edit draws its own shell (no padding); ours uses the standard one.
 		renderShell: "default",
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
+			const execCwd = ctx?.cwd || cwd;
 			const fp = params.path ?? (params as any).file_path ?? "";
 			const operations = getEditOperations(params);
-			const localizedDiffs = await localizeEditOnce(toolCallId, fp, operations);
+			const localizedDiffs = await localizeEditOnce(toolCallId, fp, operations, execCwd);
 			EDIT_LOCALIZED.delete(toolCallId);
-			const result = await editTool.execute(toolCallId, params, signal, onUpdate, ctx);
+			const result = await getEditTool(execCwd).execute(toolCallId, params, signal, onUpdate, ctx);
 			if (operations.length === 0) return result;
 			const { diffs, summary, totalLines, totalHunks } = summarizeEditOperations(operations, localizedDiffs?.map((entry) => entry.diff));
 			const baseDetails = (((result as any).details ?? {}) as Record<string, unknown>);
@@ -9838,6 +10307,8 @@ export default function (pi: ExtensionAPI) {
 			return result;
 		},
 		renderCall(args, theme, ctx) {
+			const rowCwd = ctx.cwd ?? cwd;
+			const sp = spFor(ctx);
 			const fp = args?.path ?? (args as any)?.file_path ?? "";
 			const operations = getEditOperations(args);
 			const revealSummary = shouldRevealCallArgs(ctx) || (!!fp && hasOwnArg(args, "edits"));
@@ -9861,10 +10332,10 @@ export default function (pi: ExtensionAPI) {
 				const lg = lang(fp);
 				// Located once per row: expanding or resizing must not look in the file again, it no longer holds oldText.
 				ctx.state._editLocalized ??= !finished
-					? localizeEditOnce(ctx.toolCallId, fp, operations)
+					? localizeEditOnce(ctx.toolCallId, fp, operations, rowCwd)
 					: "preview" in finished
 						? Promise.resolve(restoreLocalizedEditDiffs(finished.preview, operations))
-						: computeLocalizedEditDiffs(fp, operations, cwd, typeof finished.patch === "string" ? finished.patch : "");
+						: computeLocalizedEditDiffs(fp, operations, rowCwd, typeof finished.patch === "string" ? finished.patch : "");
 				void (ctx.state._editLocalized as Promise<LocalizedEditDiff[] | null>)
 					.then((localizedDiffs) => {
 						if (ctx.state._pk !== key) return;
@@ -9931,16 +10402,19 @@ export default function (pi: ExtensionAPI) {
 				name,
 				label,
 				description,
+				promptSnippet: typeof record.promptSnippet === "string" ? record.promptSnippet : undefined,
+				promptGuidelines: Array.isArray(record.promptGuidelines) ? record.promptGuidelines : undefined,
 				parameters: record.parameters,
+				outputSchema: record.outputSchema,
 				prepareArguments: typeof record.prepareArguments === "function" ? record.prepareArguments : undefined,
 				async execute(toolCallId: string, params: any, signal: AbortSignal | undefined, onUpdate: any, ctx: any) {
 					return await Promise.resolve(execute(toolCallId, params, signal, onUpdate, ctx));
 				},
 				renderCall(args: any, theme: Theme, ctx: any) {
-					if (name === "apply_patch") return renderApplyPatchCall(args, theme, ctx, sp);
+					if (name === "apply_patch") return renderApplyPatchCall(args, theme, ctx, spFor(ctx));
 					syncToolCallStatus(ctx);
 					ctx.state._openAiPatchFiles = [];
-					const summary = stableCallSummary(ctx, "_callSummary", () => summarizeOpenAiToolCall(name, args, theme, sp));
+					const summary = stableCallSummary(ctx, "_callSummary", () => summarizeOpenAiToolCall(name, args, theme, spFor(ctx)));
 					return makeText(
 						ctx.lastComponent,
 						toolHeader(label, summary, theme, toolStatusDot(ctx, theme), liveLineCountTrailing(ctx, theme)),
@@ -9976,7 +10450,10 @@ export default function (pi: ExtensionAPI) {
 				name,
 				label,
 				description,
+				promptSnippet: typeof record.promptSnippet === "string" ? record.promptSnippet : undefined,
+				promptGuidelines: Array.isArray(record.promptGuidelines) ? record.promptGuidelines : undefined,
 				parameters: record.parameters,
+				outputSchema: record.outputSchema,
 				prepareArguments: typeof record.prepareArguments === "function" ? record.prepareArguments : undefined,
 				async execute(toolCallId: string, params: any, signal: AbortSignal | undefined, onUpdate: any, ctx: any) {
 					return await Promise.resolve(execute(toolCallId, params, signal, onUpdate, ctx));
@@ -10030,6 +10507,8 @@ export default function (pi: ExtensionAPI) {
 		_clearAllBlinkContexts();
 	});
 	pi.on("session_shutdown", async () => {
+		flushLocalIntentCache();
+		activeSettingsCwd = undefined;
 		_clearAllBlinkContexts();
 		clearAllBashDurationContexts();
 		clearRtkRewriteState();

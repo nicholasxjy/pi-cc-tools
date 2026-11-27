@@ -693,3 +693,21 @@ test("new run and shutdown invalidate in-flight summaries", async (t) => {
 		assert.deepEqual(h.notifications, []);
 	}
 });
+
+test("fallback title skips >4096-char leading HTML comments and resolves out-of-window link definitions", async (t) => {
+	const commentPadding = `<!--\n${"metadata ".repeat(550)}\n-->\n\n`;
+	assert.ok(commentPadding.length > 4096);
+
+	for (const [prompt, reply, expected] of [
+		[`${commentPadding}# Fix the parser\n\nBody text.`, "Done", "✓ Fix the parser"],
+		[`[Fix the parser][ref]\n\n${"Body sentence.\n".repeat(400)}\n[ref]: https://example.com`, "Done", "✓ Fix the parser"],
+		[`<!-- ${"unclosed comment ".repeat(350)}`, "Done", "✓ Done"],
+	] as const) {
+		const h = harness(t);
+		await h.userPrompt(prompt);
+		await h.fire("agent_end", { messages: [{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: reply }] }] });
+		await h.fire("agent_settled", { aborted: false });
+		await tick();
+		assert.equal(h.titles.at(-1), expected);
+	}
+});

@@ -151,7 +151,7 @@ function parseSed(args: string[]): string[] | undefined {
 			i++;
 			continue;
 		}
-		if (/^-[EnrsuzE]+$/.test(arg) || arg === "--regexp-extended" || arg === "--posix") continue;
+		if (/^-[Enrsuz]+$/.test(arg) || arg === "--regexp-extended" || arg === "--posix") continue;
 		if (arg.startsWith("-")) return undefined;
 		if (!haveScript) {
 			haveScript = true;
@@ -237,9 +237,14 @@ function parseWrite(command: Token[], heredocBody: string | undefined): Omit<Bas
 	if ((name === "echo" || name === "printf") && !heredoc && target && isPlainPath(target)) {
 		let content: string | undefined;
 		if (name === "echo") {
-			const noNewline = plain[0] === "-n";
-			const parts = plain.filter((part, index) => !(index === 0 && (part === "-n" || part === "-e")));
-			content = `${parts.join(" ")}${noNewline ? "" : "\n"}`;
+			const first = plain[0] ?? "";
+			const isFlag = /^-[neE]+$/.test(first);
+			const interpretsEscapes = isFlag && first.includes("e");
+			if (!interpretsEscapes) {
+				const noNewline = isFlag && first.includes("n");
+				const parts = isFlag ? plain.slice(1) : plain;
+				content = `${parts.join(" ")}${noNewline ? "" : "\n"}`;
+			}
 		}
 		return { kind: append ? "edit" : "write", via: append ? "append" : name, paths: [target], content };
 	}
@@ -252,8 +257,9 @@ function parseWrite(command: Token[], heredocBody: string | undefined): Omit<Bas
  * single heredoc or echo/printf redirect. Undefined for anything else.
  */
 export function detectBashFileEdit(command: string): BashFileEdit | undefined {
-	if (typeof command !== "string" || !command.trim() || command.length > MAX_COMMAND_LENGTH) return undefined;
-	const split = splitHeredoc(command.trim());
+	const trimmed = typeof command === "string" ? command.trim() : "";
+	if (!trimmed || trimmed.length > MAX_COMMAND_LENGTH) return undefined;
+	const split = splitHeredoc(trimmed);
 	if (!split || split.rest.trim()) return undefined;
 	const tokens = tokenize(split.head);
 	if (!tokens) return undefined;

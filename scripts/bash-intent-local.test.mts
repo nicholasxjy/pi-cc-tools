@@ -187,3 +187,90 @@ test("when Apple's model is unavailable, labels turn off with one notice", async
 		delete process.env.FAKE_INTENT_UNAVAILABLE;
 	}
 });
+
+test("streaming command prefixes do not pollute commandKeyCache", () => {
+	intent.resetLocalIntentsForTests();
+	intent.configureLocalIntents(true);
+	intent.recordLocalIntentForTests("echo cached", "Echo cached value");
+	assert.equal(intent.getLocalIntentCacheStatsForTests().keyCacheEntries, 1);
+
+	// Streaming deltas before setArgsComplete / markExecutionStarted must not touch commandKeyCache.
+	const row = new ToolExecutionComponent("bash", `bash-stream-${Math.random()}`, { command: "echo stream" }, { showImages: false }, tools.get("bash"), { requestRender() {} } as any, cwd) as any;
+	for (let i = 1; i <= 5; i++) {
+		row.updateArgs({ command: `${"x".repeat(i * 15_000)}` });
+		row.render(100);
+	}
+	assert.equal(intent.getLocalIntentCacheStatsForTests().keyCacheEntries, 1, "streaming prefixes did not enter commandKeyCache");
+
+	// Even settled huge commands (>4096 chars) do not bloat commandKeyCache.
+	intent.localIntentFor("y".repeat(70_000));
+	assert.equal(intent.getLocalIntentCacheStatsForTests().keyCacheEntries, 1);
+	assert.ok(intent.getLocalIntentCacheStatsForTests().keyCacheChars <= 65_536);
+});
+
+test("reloading the cache writer preserves pending labels from the previous version", async () => {
+	intent.resetLocalIntentsForTests();
+	intent.recordLocalIntentForTests("before", "Before reload");
+	const retained = (globalThis as any)[Symbol.for("pi-claude-style-tools:bash-intent-local")];
+	for (const key of ["saveDirty", "saveGeneration", "savedGeneration", "saveSeq"]) delete retained[key];
+	intent.configureLocalIntents(true);
+	const cache = () => Object.values(JSON.parse(readFileSync(join(cacheDir, "bash-intents.json"), "utf8")).labels);
+	assert.deepEqual(cache(), ["Before reload"]);
+	intent.recordLocalIntentForTests("after", "After reload");
+	intent.flushLocalIntentCache();
+	assert.deepEqual(cache().sort(), ["After reload", "Before reload"]);
+});
+
+test("async intent cache saves serialize cleanly and flush on shutdown without stale overwrites", async () => {
+	intent.resetLocalIntentsForTests();
+	intent.configureLocalIntents(true);
+	const fsPromises = await import("node:fs/promises");
+	let releaseFirstWrite!: () => void;
+	const firstWriteStarted = new Promise<void>((resolveStarted) => {
+		let writes = 0;
+		intent.setLocalIntentSaveIoForTests({
+			debounceMs: 5,
+			writeFile: async (path, data, ...rest) => {
+				writes++;
+				await fsPromises.writeFile(path, data, ...rest);
+				if (writes === 1) {
+					resolveStarted();
+					await new Promise<void>((release) => { releaseFirstWrite = release; });
+				}
+			},
+		});
+	});
+
+	intent.recordLocalIntentForTests("cmd-a", "Label A");
+	await firstWriteStarted;
+	// While save A is paused mid-flight, deliver label B.
+	intent.recordLocalIntentForTests("cmd-b", "Label B");
+	releaseFirstWrite();
+	await intent.waitForLocalIntentSaveForTests();
+
+	const afterSerialize = JSON.parse(readFileSync(join(cacheDir, "bash-intents.json"), "utf8"));
+	assert.deepEqual(Object.values(afterSerialize.labels).sort(), ["Label A", "Label B"]);
+
+	// Start another delayed save C, then deliver D and flush synchronously mid-flight.
+	let releaseThirdWrite!: () => void;
+	const thirdWriteStarted = new Promise<void>((resolveStarted) => {
+		intent.setLocalIntentSaveIoForTests({
+			debounceMs: 5,
+			writeFile: async (path, data, ...rest) => {
+				await fsPromises.writeFile(path, data, ...rest);
+				resolveStarted();
+				await new Promise<void>((release) => { releaseThirdWrite = release; });
+			},
+		});
+	});
+	intent.recordLocalIntentForTests("cmd-c", "Label C");
+	await thirdWriteStarted;
+	intent.recordLocalIntentForTests("cmd-d", "Label D");
+	// Simulate session_shutdown flush before async write C resolves.
+	intent.flushLocalIntentCache();
+	releaseThirdWrite();
+	await intent.waitForLocalIntentSaveForTests();
+
+	const afterFlush = JSON.parse(readFileSync(join(cacheDir, "bash-intents.json"), "utf8"));
+	assert.deepEqual(Object.values(afterFlush.labels).sort(), ["Label A", "Label B", "Label C", "Label D"]);
+});

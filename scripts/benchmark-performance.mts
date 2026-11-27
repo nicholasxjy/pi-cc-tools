@@ -153,6 +153,8 @@ try {
 		if (!cached.rendererState[field] || cached.rendererState[field].includes("rendering")) throw new Error("Cached diff did not settle");
 		measure(`${name}-60k-diff-invalidate`, 100, () => { cached.invalidate(); cached.render(100); });
 	}
+	script.setExpanded(true);
+	script.render(100);
 	const preview = script.resultRendererComponent.children[1];
 	console.log(JSON.stringify({ node: process.version, platform: `${process.platform}/${process.arch}`, width: 100,
 		retainedPreviewRows: preview.toolCachedLines.length, results }, null, 2));

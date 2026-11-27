@@ -12,11 +12,59 @@ function normalizeHeadline(line: string): string {
 	return line.replace(/\s+/g, " ").trim();
 }
 
+function isHighSurrogate(code: number): boolean {
+	return code >= 0xd800 && code <= 0xdbff;
+}
+
+function isLowSurrogate(code: number): boolean {
+	return code >= 0xdc00 && code <= 0xdfff;
+}
+
+function countCodePointsUpTo(text: string, limit: number): number {
+	let count = 0;
+	for (let i = 0; i < text.length && count < limit; i++) {
+		count++;
+		if (isHighSurrogate(text.charCodeAt(i)) && i + 1 < text.length && isLowSurrogate(text.charCodeAt(i + 1))) {
+			i++;
+		}
+	}
+	return count;
+}
+
+function sliceHeadCodePoints(text: string, count: number): string {
+	let seen = 0;
+	let i = 0;
+	while (i < text.length && seen < count) {
+		seen++;
+		if (isHighSurrogate(text.charCodeAt(i)) && i + 1 < text.length && isLowSurrogate(text.charCodeAt(i + 1))) {
+			i += 2;
+		} else {
+			i += 1;
+		}
+	}
+	return text.slice(0, i);
+}
+
+function sliceTailCodePoints(text: string, count: number): string {
+	let seen = 0;
+	let i = text.length;
+	while (i > 0 && seen < count) {
+		seen++;
+		if (i >= 2 && isLowSurrogate(text.charCodeAt(i - 1)) && isHighSurrogate(text.charCodeAt(i - 2))) {
+			i -= 2;
+		} else {
+			i -= 1;
+		}
+	}
+	return text.slice(i);
+}
+
 function summarize(text: string, max = 180): string {
 	if (text.length <= max) return text;
+	if (text.length <= max * 2 && countCodePointsUpTo(text, max + 1) <= max) return text;
 	const head = Math.max(1, Math.ceil((max - 3) * 0.65));
 	const tail = Math.max(1, max - 3 - head);
-	return `${text.slice(0, head)}...${text.slice(-tail)}`;
+	return `${sliceHeadCodePoints(text, head)}...${sliceTailCodePoints(text, tail)}`;
 }
 
 function sanitizeSource(command: string): string[] {
@@ -61,16 +109,23 @@ export function formatBashDuration(ms: number): string {
 }
 
 export function getLastBashOutputLine(output: string): string | undefined {
-	const lines = output
-		.replace(/\r\n/g, "\n")
-		.replace(/\r/g, "\n")
-		.split("\n");
-	for (let index = lines.length - 1; index >= 0; index--) {
-		const line = lines[index]
-			.replace(ANSI_ESCAPE_RE, "")
-			.replace(CONTROL_CHAR_RE, "")
-			.trim();
-		if (line) return line;
+	let end = output.length;
+	while (end > 0) {
+		let start = end;
+		while (start > 0) {
+			const ch = output.charCodeAt(start - 1);
+			if (ch === 10 || ch === 13) break;
+			start--;
+		}
+		if (end > start) {
+			const line = output
+				.slice(start, end)
+				.replace(ANSI_ESCAPE_RE, "")
+				.replace(CONTROL_CHAR_RE, "")
+				.trim();
+			if (line) return line;
+		}
+		end = start - 1;
 	}
 	return undefined;
 }

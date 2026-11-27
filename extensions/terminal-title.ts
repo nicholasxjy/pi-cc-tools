@@ -38,8 +38,52 @@ function markdownText(tokens: Token[]): string {
 	}).join("");
 }
 
+const FAST_SAMPLE_CHARS = 4096;
+const LINK_DEF_RE = /^[ ]{0,3}\[[^\]\n]+\]:/m;
+const REF_LINK_CANDIDATE_RE = /\[[^\]]+\]/;
+
+function firstMarkdownLine(source: string): string | undefined {
+	return markdownText(Lexer.lex(source)).split(/\r?\n/).find((line) => line.trim());
+}
+
+/**
+ * Skip leading CommonMark HTML comments (`<!-- ... -->`) so long metadata blocks
+ * do not push the first visible heading past the 4096-char fast sample.
+ */
+function skipLeadingHtmlComments(text: string): number {
+	let pos = 0;
+	while (pos < text.length) {
+		const blankMatch = /^[ \t]*\r?\n/.exec(text.slice(pos));
+		if (blankMatch) {
+			pos += blankMatch[0].length;
+			continue;
+		}
+		const lineStart = pos;
+		let spaces = 0;
+		while (spaces < 4 && lineStart + spaces < text.length && text[lineStart + spaces] === " ") {
+			spaces++;
+		}
+		if (spaces >= 4 || !text.startsWith("<!--", lineStart + spaces)) break;
+		const close = text.indexOf("-->", lineStart + spaces + 2);
+		if (close === -1) return text.length;
+		const nl = text.indexOf("\n", close + 3);
+		pos = nl === -1 ? text.length : nl + 1;
+	}
+	return pos;
+}
+
 function completionLabel(text: string, limit = 62): string {
-	const line = markdownText(Lexer.lex(text)).split(/\r?\n/).find((line) => line.trim());
+	if (text.length <= FAST_SAMPLE_CHARS) {
+		return titleText(firstMarkdownLine(text), limit);
+	}
+	const start = skipLeadingHtmlComments(text);
+	if (start >= text.length) return "";
+	const end = start + FAST_SAMPLE_CHARS;
+	const sample = text.slice(start, end);
+	let line = firstMarkdownLine(sample);
+	if (!line || (end < text.length && REF_LINK_CANDIDATE_RE.test(line) && LINK_DEF_RE.test(text.slice(end)))) {
+		line = firstMarkdownLine(text);
+	}
 	return titleText(line, limit);
 }
 
@@ -196,12 +240,19 @@ export function installTerminalTitle(
 	pi.on("agent_end", (event, ctx) => {
 		finalReply = undefined;
 		if (!active(ctx)) return;
-		const assistant = event.messages?.slice().reverse().find((message) => message.role === "assistant");
-		if (assistant?.stopReason !== "stop") return;
-		finalReply = assistant.content
-			.filter((block) => block.type === "text")
-			.map((block) => block.text)
-			.join("\n");
+		const messages = event.messages;
+		if (!Array.isArray(messages)) return;
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const msg = messages[i];
+			if (msg?.role === "assistant") {
+				if (msg.stopReason !== "stop") return;
+				finalReply = msg.content
+					.filter((block) => block.type === "text")
+					.map((block) => block.text)
+					.join("\n");
+				return;
+			}
+		}
 	});
 	pi.on("session_start", resume);
 	pi.on("session_tree", resume);
@@ -214,6 +265,7 @@ export function installTerminalTitle(
 		const request = queuedPrompt ?? taskPrompt;
 		const reply = finalReply;
 		taskPrompt = queuedPrompt = finalReply = undefined;
+		namedExecutions.clear();
 		if (!event.aborted && request !== undefined && reply !== undefined && active(ctx)) {
 			void summarize(request, reply, ctx);
 		}

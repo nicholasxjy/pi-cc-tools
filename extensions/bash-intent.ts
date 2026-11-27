@@ -14,7 +14,8 @@
 
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdir, unlink, writeFile } from "node:fs/promises";
 import { homedir, release } from "node:os";
 import { join } from "node:path";
 
@@ -121,12 +122,50 @@ struct BashIntentHelper {
 const MAX_CACHE_ENTRIES = 2000;
 const MAX_PENDING = 20;
 const MAX_WATCHED = 200;
+const COMMAND_KEY_CACHE_LIMIT = 256;
+const COMMAND_KEY_CACHE_MAX_CHARS = 4096;
+const COMMAND_KEY_CACHE_MAX_TOTAL_CHARS = 65_536;
+const commandKeyCache = new Map<string, string>();
+let commandKeyCacheChars = 0;
+
+interface SaveIo {
+  mkdir: typeof mkdir;
+  writeFile: typeof writeFile;
+  unlink: typeof unlink;
+  debounceMs: number;
+}
+
+const DEFAULT_SAVE_IO: SaveIo = {
+  mkdir,
+  writeFile,
+  unlink,
+  debounceMs: 1500,
+};
+let saveIo: SaveIo = DEFAULT_SAVE_IO;
 
 function cacheDir(): string {
   return process.env.PI_CC_UI_CACHE_DIR || join(homedir(), "Library", "Caches", "pi-claude-code-ui");
 }
 
-const commandKey = (command: string) => createHash("sha256").update(command).digest("hex").slice(0, 24);
+function commandKey(command: string): string {
+  let key = commandKeyCache.get(command);
+  if (key !== undefined) return key;
+  key = createHash("sha256").update(command).digest("hex").slice(0, 24);
+  if (command.length <= COMMAND_KEY_CACHE_MAX_CHARS) {
+    while (
+      commandKeyCache.size >= COMMAND_KEY_CACHE_LIMIT
+      || commandKeyCacheChars + command.length > COMMAND_KEY_CACHE_MAX_TOTAL_CHARS
+    ) {
+      const oldest = commandKeyCache.keys().next().value;
+      if (oldest === undefined) break;
+      commandKeyCache.delete(oldest);
+      commandKeyCacheChars = Math.max(0, commandKeyCacheChars - oldest.length);
+    }
+    commandKeyCache.set(command, key);
+    commandKeyCacheChars += command.length;
+  }
+  return key;
+}
 
 interface LocalIntentState {
   enabled: boolean;
@@ -142,6 +181,12 @@ interface LocalIntentState {
   labels: Map<string, string>;
   cacheLoaded: boolean;
   saveTimer?: ReturnType<typeof setTimeout>;
+  saveInFlight?: Promise<void>;
+  saveGeneration: number;
+  savedGeneration: number;
+  saveDirty: boolean;
+  saveSeq: number;
+  cancelled?: boolean;
   /** command → redraw callbacks of rows that show it. */
   watchers: Map<string, Set<() => void>>;
   onProblem?: (message: string) => void;
@@ -164,10 +209,21 @@ function state(): LocalIntentState {
       queue: [],
       labels: new Map(),
       cacheLoaded: false,
+      saveGeneration: 0,
+      savedGeneration: 0,
+      saveDirty: false,
+      saveSeq: 0,
       watchers: new Map(),
       reportedProblem: false,
       crashes: 0,
     } satisfies LocalIntentState;
+  } else if (g[STATE_KEY].saveGeneration === undefined) {
+    // A /reload can retain a pending timer and labels from the older cache writer.
+    const previous = g[STATE_KEY] as LocalIntentState;
+    previous.saveDirty = previous.labels.size > 0;
+    previous.saveGeneration = previous.saveDirty ? 1 : 0;
+    previous.savedGeneration = 0;
+    previous.saveSeq = 0;
   }
   return g[STATE_KEY] as LocalIntentState;
 }
@@ -175,6 +231,7 @@ function state(): LocalIntentState {
 /** Turn local labels on or off for this session; stops any helper from a previous load. */
 export function configureLocalIntents(enabled: boolean, onProblem?: (message: string) => void): void {
   const s = state();
+  flushLocalIntentCacheForState(s);
   stopHelper(s);
   s.enabled = enabled;
   s.onProblem = onProblem;
@@ -227,35 +284,99 @@ function loadCache(s: LocalIntentState): void {
   } catch { /* no cache yet */ }
 }
 
+function startAsyncSave(s: LocalIntentState): void {
+  if (s.saveInFlight || s.cancelled) return;
+  s.saveInFlight = drainSaveQueue(s).finally(() => {
+    s.saveInFlight = undefined;
+    if (!s.cancelled && (s.saveDirty || s.savedGeneration < s.saveGeneration)) {
+      saveCacheSoon(s);
+    }
+  });
+}
+
 function saveCacheSoon(s: LocalIntentState): void {
-  if (s.saveTimer) return;
+  if (s.cancelled || s.saveTimer || s.saveInFlight) return;
   s.saveTimer = setTimeout(() => {
     s.saveTimer = undefined;
-    saveCacheNow(s);
-  }, 1500);
+    startAsyncSave(s);
+  }, saveIo.debounceMs);
   s.saveTimer.unref?.();
 }
 
+async function drainSaveQueue(s: LocalIntentState): Promise<void> {
+  while (!s.cancelled && (s.saveDirty || s.savedGeneration < s.saveGeneration)) {
+    const gen = s.saveGeneration;
+    const payload = JSON.stringify({ version: 1, labels: Object.fromEntries(s.labels) });
+    s.saveDirty = false;
+    const dir = cacheDir();
+    const file = join(dir, "bash-intents.json");
+    const tmp = `${file}.${process.pid}.${++s.saveSeq}.tmp`;
+    let tempWritten = false;
+    try {
+      await saveIo.mkdir(dir, { recursive: true });
+      if (s.cancelled) break;
+      await saveIo.writeFile(tmp, payload);
+      tempWritten = true;
+      if (s.cancelled || s.savedGeneration >= gen || s.saveGeneration > gen) {
+        await saveIo.unlink(tmp).catch(() => {});
+        if (s.cancelled) break;
+        continue;
+      }
+      // Publish in the same turn as the generation check so shutdown cannot flush between them.
+      renameSync(tmp, file);
+      tempWritten = false;
+      s.savedGeneration = Math.max(s.savedGeneration, gen);
+    } catch {
+      if (tempWritten) await saveIo.unlink(tmp).catch(() => {});
+      break;
+    }
+  }
+}
+
 function saveCacheNow(s: LocalIntentState): void {
+  const gen = s.saveGeneration;
+  let tmp = "";
   try {
     const dir = cacheDir();
     mkdirSync(dir, { recursive: true });
     const file = join(dir, "bash-intents.json");
-    writeFileSync(`${file}.tmp`, JSON.stringify({ version: 1, labels: Object.fromEntries(s.labels) }));
-    renameSync(`${file}.tmp`, file);
-  } catch { /* the cache is only an optimization */ }
+    tmp = `${file}.${process.pid}.${++s.saveSeq}.tmp`;
+    writeFileSync(tmp, JSON.stringify({ version: 1, labels: Object.fromEntries(s.labels) }));
+    renameSync(tmp, file);
+    tmp = "";
+    s.savedGeneration = Math.max(s.savedGeneration, gen);
+    if (s.saveGeneration === gen) s.saveDirty = false;
+  } catch {
+    if (tmp) {
+      try {
+        unlinkSync(tmp);
+      } catch { /* best effort */ }
+    }
+  }
 }
 
-const EXIT_HOOK_KEY = Symbol.for("pi-claude-style-tools:bash-intent-exit-hook");
+function flushLocalIntentCacheForState(s: LocalIntentState | undefined): void {
+  if (!s) return;
+  if (s.saveTimer) {
+    clearTimeout(s.saveTimer);
+    s.saveTimer = undefined;
+  }
+  if (s.saveDirty || s.savedGeneration < s.saveGeneration) {
+    saveCacheNow(s);
+  }
+}
+
+/** Write any pending local intent labels to disk synchronously. */
+export function flushLocalIntentCache(): void {
+  flushLocalIntentCacheForState((globalThis as any)[STATE_KEY] as LocalIntentState | undefined);
+}
+
+const EXIT_HOOK_KEY = Symbol.for("pi-claude-style-tools:bash-intent-exit-hook-v2");
 if (!(globalThis as any)[EXIT_HOOK_KEY]) {
   (globalThis as any)[EXIT_HOOK_KEY] = true;
   process.once("exit", () => {
     const s = (globalThis as any)[STATE_KEY] as LocalIntentState | undefined;
-    if (s?.saveTimer) {
-      clearTimeout(s.saveTimer);
-      s.saveTimer = undefined;
-      saveCacheNow(s);
-    }
+    flushLocalIntentCacheForState(s);
     if (s) stopHelper(s);
   });
 }
@@ -265,6 +386,7 @@ export function localIntentFor(command: string): string | undefined {
   const s = state();
   if (!command) return undefined;
   loadCache(s);
+  if (s.labels.size === 0) return undefined;
   return s.labels.get(commandKey(command));
 }
 
@@ -319,6 +441,8 @@ function deliver(s: LocalIntentState, command: string, label: string): void {
     if (oldest === undefined) break;
     s.labels.delete(oldest);
   }
+  s.saveGeneration++;
+  s.saveDirty = true;
   saveCacheSoon(s);
   const callbacks = s.watchers.get(command);
   s.watchers.delete(command);
@@ -432,8 +556,13 @@ async function startHelper(s: LocalIntentState): Promise<void> {
 /** For tests: forget everything, including the on-disk cache state in memory. */
 export function resetLocalIntentsForTests(): void {
   const s = state();
+  s.cancelled = true;
   stopHelper(s);
   if (s.saveTimer) clearTimeout(s.saveTimer);
+  s.saveTimer = undefined;
+  commandKeyCache.clear();
+  commandKeyCacheChars = 0;
+  saveIo = DEFAULT_SAVE_IO;
   delete (globalThis as any)[STATE_KEY];
 }
 
@@ -443,4 +572,35 @@ export function flushLocalIntentCacheForTests(): void {
   if (s.saveTimer) clearTimeout(s.saveTimer);
   s.saveTimer = undefined;
   saveCacheNow(s);
+}
+
+/** For tests: inspect bounded command-key cache occupancy. */
+export function getLocalIntentCacheStatsForTests(): { keyCacheEntries: number; keyCacheChars: number; labelCount: number; saveDirty: boolean; hasInFlightSave: boolean } {
+  const s = state();
+  return {
+    keyCacheEntries: commandKeyCache.size,
+    keyCacheChars: commandKeyCacheChars,
+    labelCount: s.labels.size,
+    saveDirty: s.saveDirty || s.savedGeneration < s.saveGeneration,
+    hasInFlightSave: !!s.saveInFlight,
+  };
+}
+
+/** For tests: customize async save I/O and debounce, or await any in-flight save. */
+export function setLocalIntentSaveIoForTests(overrides?: Partial<SaveIo>): void {
+  saveIo = overrides ? { ...DEFAULT_SAVE_IO, ...overrides } : DEFAULT_SAVE_IO;
+}
+
+export async function waitForLocalIntentSaveForTests(): Promise<void> {
+  const s = state();
+  while (s.saveInFlight) {
+    await s.saveInFlight;
+  }
+}
+
+/** For tests: seed a settled intent delivery through the same path as the helper. */
+export function recordLocalIntentForTests(command: string, label: string): void {
+  const cleaned = cleanIntentLabel(label);
+  if (!cleaned) return;
+  deliver(state(), command, cleaned);
 }
